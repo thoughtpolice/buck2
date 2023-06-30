@@ -7,7 +7,6 @@
  * of this source tree.
  */
 
-#![feature(int_roundings)]
 #![deny(unused_crate_dependencies)]
 mod named_semaphores;
 pub use named_semaphores::NamedSemaphores;

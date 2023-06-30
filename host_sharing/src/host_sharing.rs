@@ -114,13 +114,27 @@ impl HostSharingBroker {
     // If a test requires Permits(4) permits but the machine only has 3 permits then we cap the
     // test's required permits to 3. Otherwise the test would never be allowed to run.
     pub fn requested_permits(&self, weight_class: &WeightClass) -> usize {
+        // NOTE (aseipp; [ref:unstable-rustc]): This is a bit of a hack,
+        // div_ceil is not yet stabilized on unsigned integers for rustc; see:
+        //
+        //  - https://github.com/rust-lang/rust/issues/88581
+        //  - https://github.com/rust-lang/rust/pull/88582
+        //
+        // this is just a private, clipped implementation of div_ceil for use
+        // below. we can delete this after rust#88581 is resolved.
+        fn usize_div_ceil(lhs: usize, rhs: usize) -> usize {
+            let d = lhs / rhs;
+            let r = lhs % rhs;
+            if r > 0 && rhs > 0 { d + 1 } else { d }
+        }
+
         match weight_class {
             WeightClass::Permits(required_permits) => {
                 self.num_machine_permits.min(*required_permits)
             }
             WeightClass::Percentage(percentage) => {
                 let percentage: usize = percentage.into_value().into();
-                (self.num_machine_permits * percentage).div_ceil(100)
+                usize_div_ceil(self.num_machine_permits * percentage, 100)
             }
         }
     }
