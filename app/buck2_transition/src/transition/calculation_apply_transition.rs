@@ -284,10 +284,9 @@ impl TransitionCalculation for TransitionCalculationImpl {
                 ctx: &DiceComputations,
                 _cancellation: &CancellationContext,
             ) -> Self::Value {
-                let v: SharedResult<_> = try {
+                let v: SharedResult<_> =
                     do_apply_transition(ctx, self.attrs.as_deref(), &self.cfg, &self.transition_id)
-                        .await?
-                };
+                        .await;
 
                 Ok(Arc::new(v.with_context(|| {
                     format!("Error computing transition `{}`", self)

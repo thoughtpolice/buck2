@@ -7,8 +7,6 @@
  * of this source tree.
  */
 
-#![feature(try_blocks)]
-
 pub(crate) mod coerced_attr;
 pub(crate) mod transition;
 
