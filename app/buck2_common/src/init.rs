@@ -13,8 +13,8 @@ use std::time::Duration;
 use allocative::Allocative;
 use anyhow::Context;
 use buck2_core::buck2_env;
-use buck2_error::conversion::from_any;
 use buck2_error::BuckErrorContext;
+use buck2_error::conversion::from_any;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -321,6 +321,13 @@ impl ResourceControlConfig {
     }
 }
 
+#[derive(Allocative, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum LogDownloadMethod {
+    Manifold,
+    Curl(String),
+    None,
+}
+
 /// Configurations that are used at startup by the daemon. Those are actually read by the client,
 /// and passed on to the daemon.
 ///
@@ -340,11 +347,54 @@ pub struct DaemonStartupConfig {
     pub materializations: Option<String>,
     pub http: HttpConfig,
     pub resource_control: ResourceControlConfig,
+    pub log_download_method: LogDownloadMethod,
 }
 
 impl DaemonStartupConfig {
     pub fn new(config: &LegacyBuckConfig) -> buck2_error::Result<Self> {
         // Intepreted client side because we need the value here.
+
+        let log_download_method = {
+            // Determine the log download method to use. This rather annoyingly
+            // long bit of logic is here so that there is the smallest amount of
+            // #[cfg]'d code possible, and so that fbcode and non-fbcode builds
+            // can have the same codepath for manifold/curl, with manifold being
+            // the fbcode default and curl being the OSS default.
+
+            #[cfg(fbcode_build)]
+            let use_manifold_default = true;
+            #[cfg(not(fbcode_build))]
+            let use_manifold_default = false;
+
+            let use_manifold = config
+                .parse(BuckconfigKeyRef {
+                    section: "buck2",
+                    property: "log_use_manifold",
+                })?
+                .unwrap_or(use_manifold_default);
+
+            if use_manifold {
+                Ok(LogDownloadMethod::Manifold)
+            } else {
+                let log_url = config.get(BuckconfigKeyRef {
+                    section: "buck2",
+                    property: "log_url",
+                });
+                if let Some(log_url) = log_url {
+                    if log_url.is_empty() {
+                        Err(buck2_error::buck2_error!(
+                            [],
+                            "log_url is empty, but log_use_manifold is false"
+                        ))
+                    } else {
+                        Ok(LogDownloadMethod::Curl(log_url.to_owned()))
+                    }
+                } else {
+                    Ok(LogDownloadMethod::None)
+                }
+            }
+        }?;
+
         Ok(Self {
             daemon_buster: config
                 .get(BuckconfigKeyRef {
@@ -373,6 +423,7 @@ impl DaemonStartupConfig {
                 .map(ToOwned::to_owned),
             http: HttpConfig::from_config(config)?,
             resource_control: ResourceControlConfig::from_config(config)?,
+            log_download_method,
         })
     }
 
@@ -393,6 +444,10 @@ impl DaemonStartupConfig {
             materializations: None,
             http: HttpConfig::default(),
             resource_control: ResourceControlConfig::default(),
+            #[cfg(fbcode_build)]
+            log_download_method: LogDownloadMethod::Manifold,
+            #[cfg(not(fbcode_build))]
+            log_download_method: LogDownloadMethod::None,
         }
     }
 }
