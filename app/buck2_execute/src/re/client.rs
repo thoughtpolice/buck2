@@ -303,7 +303,7 @@ impl RemoteExecutionClient {
 
     pub async fn upload_blob(
         &self,
-        blob: Vec<u8>,
+        blob: InlinedBlobWithDigest,
         use_case: RemoteExecutorUseCase,
     ) -> buck2_error::Result<TDigest> {
         self.data
@@ -1228,9 +1228,10 @@ impl RemoteExecutionClientImpl {
 
     pub async fn upload_blob(
         &self,
-        blob: Vec<u8>,
+        blob: InlinedBlobWithDigest,
         use_case: RemoteExecutorUseCase,
     ) -> buck2_error::Result<TDigest> {
+        let digest = blob.digest.clone();
         with_error_handler(
             "upload_blob",
             self.get_session_id(),
@@ -1238,7 +1239,8 @@ impl RemoteExecutionClientImpl {
                 .upload_blob(blob, use_case.metadata(None))
                 .await,
         )
-        .await
+        .await?;
+        Ok(digest)
     }
 
     async fn materialize_files(
