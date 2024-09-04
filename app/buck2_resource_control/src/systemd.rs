@@ -216,11 +216,13 @@ impl ResourceControlRunner {
         let decision = Self::creation_decision(config);
         match decision {
             SystemdCreationDecision::SkipNotNeeded => Ok(false),
-            SystemdCreationDecision::SkipPreferredButNotRequired { e } => {
+            SystemdCreationDecision::SkipPreferredButNotRequired { .. } => {
+                /*
                 tracing::warn!(
                     "Systemd is not available on this system. Continuing without resource control: {:#}",
                     e
                 );
+                */
                 Ok(false)
             }
             SystemdCreationDecision::SkipRequiredButUnavailable { e } => {

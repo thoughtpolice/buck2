@@ -100,6 +100,7 @@ buck_rust_binary(
     deps = [
         "fbsource//third-party/rust:anyhow",
         "fbsource//third-party/rust:tracing",
+        "fbsource//third-party/rust:mimalloc",
         "//buck2/app/buck2:buck2",
         "//buck2/app/buck2_build_info:buck2_build_info",
         "//buck2/app/buck2_certs:buck2_certs",
@@ -112,11 +113,6 @@ buck_rust_binary(
         "//buck2/app/buck2_wrapper_common:buck2_wrapper_common",
         "//buck2/gazebo/dupe:dupe",
     ] + select({
-        "DEFAULT": [],
-        "ovr_config//os:windows": [
-            "fbsource//third-party/rust:mimalloc",
-        ],
-    }) + select({
         ":buck2_client_only_build": [],
         "DEFAULT": [
             "//buck2/app/buck2_action_impl:buck2_action_impl",
