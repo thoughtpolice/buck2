@@ -37,3 +37,6 @@ dice_futures = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fbcode_build)"] }
