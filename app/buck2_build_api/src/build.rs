@@ -589,6 +589,7 @@ async fn build_configured_label_inner<'a>(
         signals.top_level_target(providers_label.target().dupe(), node_keys);
     }
 
+    /*
     if !opts.skippable && outputs.is_empty() {
         let docs = "https://buck2.build/docs/users/faq/common_issues/#why-does-my-target-not-have-any-outputs"; // @oss-enable
         // @oss-disable: let docs = "https://www.internalfb.com/intern/staticdocs/buck2/docs/users/faq/common_issues/#why-does-my-target-not-have-any-outputs";
@@ -598,6 +599,7 @@ async fn build_configured_label_inner<'a>(
             docs,
         ));
     }
+    */
 
     let mut outputs: Vec<_> = outputs
         .iter()
