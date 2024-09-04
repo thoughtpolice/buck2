@@ -19,6 +19,7 @@ use std::time::Instant;
 use anyhow::Context;
 use buck2_re_configuration::Buck2OssReConfiguration;
 use buck2_re_configuration::HttpHeader;
+use dashmap::DashMap;
 use dupe::Dupe;
 use futures::Stream;
 use futures::future::BoxFuture;
@@ -39,13 +40,18 @@ use re_grpc_proto::build::bazel::remote::execution::v2::Digest;
 use re_grpc_proto::build::bazel::remote::execution::v2::ExecuteOperationMetadata;
 use re_grpc_proto::build::bazel::remote::execution::v2::ExecuteRequest as GExecuteRequest;
 use re_grpc_proto::build::bazel::remote::execution::v2::ExecuteResponse as GExecuteResponse;
+use re_grpc_proto::build::bazel::remote::execution::v2::ExecutedActionMetadata;
 use re_grpc_proto::build::bazel::remote::execution::v2::FindMissingBlobsRequest;
 use re_grpc_proto::build::bazel::remote::execution::v2::FindMissingBlobsResponse;
 use re_grpc_proto::build::bazel::remote::execution::v2::GetActionResultRequest;
 use re_grpc_proto::build::bazel::remote::execution::v2::GetCapabilitiesRequest;
+use re_grpc_proto::build::bazel::remote::execution::v2::OutputDirectory;
+use re_grpc_proto::build::bazel::remote::execution::v2::OutputFile;
+use re_grpc_proto::build::bazel::remote::execution::v2::OutputSymlink;
 use re_grpc_proto::build::bazel::remote::execution::v2::RequestMetadata;
 use re_grpc_proto::build::bazel::remote::execution::v2::ResultsCachePolicy;
 use re_grpc_proto::build::bazel::remote::execution::v2::ToolDetails;
+use re_grpc_proto::build::bazel::remote::execution::v2::UpdateActionResultRequest;
 use re_grpc_proto::build::bazel::remote::execution::v2::action_cache_client::ActionCacheClient;
 use re_grpc_proto::build::bazel::remote::execution::v2::batch_update_blobs_request::Request;
 use re_grpc_proto::build::bazel::remote::execution::v2::capabilities_client::CapabilitiesClient;
@@ -116,6 +122,13 @@ fn check_status(status: Status) -> Result<(), REClientError> {
         message: status.message,
         group: TCodeReasonGroup::UNKNOWN,
     })
+}
+
+fn ttimestamp_to(ts: TTimestamp) -> ::prost_types::Timestamp {
+    ::prost_types::Timestamp {
+        seconds: ts.seconds,
+        nanos: ts.nanos,
+    }
 }
 
 fn ttimestamp_from(ts: Option<::prost_types::Timestamp>) -> TTimestamp {
@@ -479,6 +492,13 @@ impl FindMissingCache {
     }
 }
 
+#[derive(Clone)]
+enum OngoingUploadStatus {
+    Active(tokio::sync::watch::Receiver<Result<(), ()>>),
+    Done,
+    Error,
+}
+
 pub struct REClient {
     runtime_opts: RERuntimeOpts,
     grpc_clients: GRPCClients,
@@ -486,6 +506,7 @@ pub struct REClient {
     instance_name: InstanceName,
     // buck2 calls find_missing for same blobs
     find_missing_cache: Mutex<FindMissingCache>,
+    prev_uploads: DashMap<TDigest, OngoingUploadStatus>,
 }
 
 impl Drop for REClient {
@@ -560,6 +581,7 @@ impl REClient {
                 ttl: Duration::from_secs(12 * 60 * 60), // 12 hours TODO: Tune this parameter
                 last_check: Instant::now(),
             }),
+            prev_uploads: DashMap::new(),
         }
     }
 
@@ -590,10 +612,28 @@ impl REClient {
 
     pub async fn write_action_result(
         &self,
-        _metadata: RemoteExecutionMetadata,
-        _request: WriteActionResultRequest,
+        metadata: RemoteExecutionMetadata,
+        request: WriteActionResultRequest,
     ) -> anyhow::Result<WriteActionResultResponse> {
-        Err(anyhow::anyhow!("Not supported"))
+        let mut client = self.grpc_clients.action_cache_client.clone();
+
+        let res = client
+            .update_action_result(with_re_metadata(
+                UpdateActionResultRequest {
+                    instance_name: self.instance_name.as_str().to_owned(),
+                    action_digest: Some(tdigest_to(request.action_digest)),
+                    action_result: Some(convert_t_action_result2(request.action_result)?),
+                    results_cache_policy: None,
+                },
+                metadata,
+                self.runtime_opts.use_fbcode_metadata,
+            ))
+            .await?;
+
+        Ok(WriteActionResultResponse {
+            actual_action_result: convert_action_result(res.into_inner())?,
+            ttl_seconds: 0,
+        })
     }
 
     pub async fn execute_with_progress(
@@ -729,6 +769,7 @@ impl REClient {
             request,
             self.capabilities.max_total_batch_size,
             self.runtime_opts.max_concurrent_uploads_per_action,
+            &self.prev_uploads,
             |re_request| async {
                 let metadata = metadata.clone();
                 let mut cas_client = self.grpc_clients.cas_client.clone();
@@ -1027,6 +1068,89 @@ fn convert_action_result(action_result: ActionResult) -> anyhow::Result<TActionR
     Ok(action_result)
 }
 
+fn convert_t_action_result2(t_action_result: TActionResult2) -> anyhow::Result<ActionResult> {
+    let t_execution_metadata = t_action_result.execution_metadata;
+    let virtual_execution_duration = prost_types::Duration::try_from(
+        t_execution_metadata
+            .execution_completed_timestamp
+            .saturating_duration_since(&t_execution_metadata.execution_start_timestamp),
+    )?;
+    let execution_metadata = Some(ExecutedActionMetadata {
+        worker: t_execution_metadata.worker,
+        queued_timestamp: Some(ttimestamp_to(t_execution_metadata.queued_timestamp)),
+        worker_start_timestamp: Some(ttimestamp_to(t_execution_metadata.worker_start_timestamp)),
+        worker_completed_timestamp: Some(ttimestamp_to(
+            t_execution_metadata.worker_completed_timestamp,
+        )),
+        input_fetch_start_timestamp: Some(ttimestamp_to(
+            t_execution_metadata.input_fetch_start_timestamp,
+        )),
+        input_fetch_completed_timestamp: Some(ttimestamp_to(
+            t_execution_metadata.input_fetch_completed_timestamp,
+        )),
+        execution_start_timestamp: Some(ttimestamp_to(
+            t_execution_metadata.execution_start_timestamp,
+        )),
+        execution_completed_timestamp: Some(ttimestamp_to(
+            t_execution_metadata.execution_completed_timestamp,
+        )),
+        virtual_execution_duration: Some(virtual_execution_duration),
+        output_upload_start_timestamp: Some(ttimestamp_to(
+            t_execution_metadata.output_upload_start_timestamp,
+        )),
+        output_upload_completed_timestamp: Some(ttimestamp_to(
+            t_execution_metadata.output_upload_completed_timestamp,
+        )),
+        auxiliary_metadata: Vec::new(),
+    });
+
+    let output_files = t_action_result
+        .output_files
+        .into_map(|output_file| OutputFile {
+            path: output_file.name,
+            digest: Some(tdigest_to(output_file.digest.digest)),
+            is_executable: output_file.executable,
+            contents: Vec::new(),
+            node_properties: None,
+        });
+
+    let output_symlinks =
+        t_action_result
+            .output_symlinks
+            .into_map(|output_symlink| OutputSymlink {
+                path: output_symlink.name,
+                target: output_symlink.target,
+                node_properties: None,
+            });
+
+    let output_directories = t_action_result
+        .output_directories
+        .into_map(|output_directory| {
+            let digest = tdigest_to(output_directory.tree_digest);
+            OutputDirectory {
+                path: output_directory.path,
+                tree_digest: Some(digest.clone()),
+                is_topologically_sorted: false,
+            }
+        });
+
+    let action_result = ActionResult {
+        output_files,
+        output_file_symlinks: Vec::new(),
+        output_symlinks,
+        output_directories,
+        output_directory_symlinks: Vec::new(),
+        exit_code: t_action_result.exit_code,
+        stdout_raw: Vec::new(),
+        stdout_digest: t_action_result.stdout_digest.map(tdigest_to),
+        stderr_raw: Vec::new(),
+        stderr_digest: t_action_result.stderr_digest.map(tdigest_to),
+        execution_metadata,
+    };
+
+    Ok(action_result)
+}
+
 async fn download_impl<Byt, BytRet, Cas>(
     instance_name: &InstanceName,
     request: DownloadRequest,
@@ -1206,6 +1330,7 @@ async fn upload_impl<Byt, Cas>(
     request: UploadRequest,
     max_total_batch_size: usize,
     max_concurrent_uploads: Option<usize>,
+    prev_uploads: &DashMap<TDigest, OngoingUploadStatus>,
     cas_f: impl Fn(BatchUpdateBlobsRequest) -> Cas + Sync + Send + Copy,
     bystream_fut: impl Fn(Vec<WriteRequest>) -> Byt + Sync + Send + Copy,
 ) -> anyhow::Result<UploadResponse>
@@ -1266,10 +1391,9 @@ where
 
     // Create futures for any files that needs uploading.
     for file in request.files_with_digest.unwrap_or_default() {
-        let hash = file.digest.hash.clone();
-        let size = file.digest.size_in_bytes;
+        let digest = file.digest.clone();
         let name = file.name.clone();
-        if size < max_total_batch_size as i64 {
+        if digest.size_in_bytes < max_total_batch_size as i64 {
             batched_blob_updates.push(BatchUploadRequest::File(file));
             continue;
         }
@@ -1278,45 +1402,96 @@ where
             "{}uploads/{}/blobs/{}/{}",
             instance_name.as_resource_prefix(),
             client_uuid,
-            hash.clone(),
-            size
+            file.digest.hash,
+            file.digest.size_in_bytes
         );
+
+        enum UploadStatus {
+            New(tokio::sync::watch::Sender<Result<(), ()>>),
+            Ongoing(OngoingUploadStatus),
+        }
+
+        let upload_status = match prev_uploads.entry(digest.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(o) => UploadStatus::Ongoing(o.get().clone()),
+            dashmap::mapref::entry::Entry::Vacant(v) => {
+                let (tx, rx) = tokio::sync::watch::channel(Err(()));
+                v.insert(OngoingUploadStatus::Active(rx));
+                UploadStatus::New(tx)
+            }
+        };
         let fut = async move {
-            let mut file = tokio::fs::File::open(&name)
-                .await
-                .with_context(|| format!("Opening `{name}` for reading failed"))?;
-            let mut data = vec![0; max_total_batch_size];
-
-            let mut write_offset = 0;
-            let mut upload_segments = Vec::new();
-            loop {
-                let length = file
-                    .read(&mut data)
-                    .await
-                    .with_context(|| format!("Error reading from {name}"))?;
-                if length == 0 {
-                    break;
+            match upload_status {
+                UploadStatus::Ongoing(OngoingUploadStatus::Active(mut rx)) => {
+                    // Another task was already uploading this artifact, wait for it complete and report result.
+                    rx.changed().await?;
+                    rx.borrow_and_update().as_ref().map_err(|_e| {
+                        anyhow::anyhow!("Upload queued for previous action failed.")
+                    })?;
                 }
-                upload_segments.push(WriteRequest {
-                    resource_name: resource_name.to_owned(),
-                    write_offset,
-                    finish_write: false,
-                    data: data[..length].to_owned(),
-                });
-                write_offset += length as i64;
-            }
-            upload_segments
-                .last_mut()
-                .with_context(|| format!("Read no segments from `{name} "))?
-                .finish_write = true;
+                UploadStatus::Ongoing(OngoingUploadStatus::Done) => {
+                    // Another task has already completed the upload of this artifact, no need to do any work.
+                }
+                UploadStatus::Ongoing(OngoingUploadStatus::Error) => {
+                    // Another task tried to perform the transmission, but failed.
+                    anyhow::bail!("Upload queued for previous action failed.")
+                }
+                UploadStatus::New(tx) => {
+                    let mut file = tokio::fs::File::open(&name)
+                        .await
+                        .with_context(|| format!("Opening `{name}` for reading failed"))?;
+                    let mut data = vec![0; max_total_batch_size];
 
-            let resp = bystream_fut(upload_segments).await?;
-            if resp.committed_size != size {
-                return Err(anyhow::anyhow!(
-                    "Failed to upload `{name}`: invalid committed_size from WriteResponse"
-                ));
+                    let mut write_offset = 0;
+                    let mut upload_segments = Vec::new();
+                    loop {
+                        let length = file
+                            .read(&mut data)
+                            .await
+                            .with_context(|| format!("Error reading from {name}"))?;
+                        if length == 0 {
+                            break;
+                        }
+                        upload_segments.push(WriteRequest {
+                            resource_name: resource_name.to_owned(),
+                            write_offset,
+                            finish_write: false,
+                            data: data[..length].to_owned(),
+                        });
+                        write_offset += length as i64;
+                    }
+                    upload_segments
+                        .last_mut()
+                        .with_context(|| format!("Read no segments from `{name} "))?
+                        .finish_write = true;
+
+                    let upload_ret = bystream_fut(upload_segments)
+                        .await
+                        .and_then(|resp| {
+                            if resp.committed_size != digest.size_in_bytes {
+                                Err(anyhow::anyhow!(
+                                    "Failed to upload `{name}`: invalid committed_size from WriteResponse"
+                                ))
+                            }
+                            else {
+                                Ok(())
+                            }
+                        });
+
+                    // Mark artifact as uploaded and notify other potentially waiting tasks.
+                    if upload_ret.is_ok() {
+                        prev_uploads.alter(&digest, |_, _| OngoingUploadStatus::Done);
+                        let _ = tx.send(upload_ret.as_ref().map_err(|_| ()).cloned());
+                    } else {
+                        prev_uploads.alter(&digest, |_, _| OngoingUploadStatus::Error);
+                        let _ = tx.send(Err(()));
+                    }
+
+                    // Only propage errors _after_ notifying other waiting tasks that this task is complete.
+                    upload_ret?;
+                }
             }
-            Ok(vec![hash])
+
+            Ok(vec![digest.hash])
         };
         upload_futures.push(Box::pin(fut));
     }
@@ -2091,6 +2266,7 @@ mod tests {
             req,
             10000,
             None,
+            &DashMap::new(),
             |req| {
                 let res = res.clone();
                 let digest1 = digest1.clone();
@@ -2174,6 +2350,7 @@ mod tests {
             req,
             10, // kept small to simulate a large file upload
             None,
+            &DashMap::new(),
             |req| {
                 let res = res.clone();
                 let digest1 = digest1.clone();
@@ -2248,6 +2425,7 @@ mod tests {
             req,
             10, // kept small to simulate a large inlined upload
             None,
+            &DashMap::new(),
             |req| {
                 let res = res.clone();
                 let digest1 = digest1.clone();
@@ -2309,6 +2487,7 @@ mod tests {
             req,
             10,
             None,
+            &DashMap::new(),
             |_req| async move {
                 panic!("This should not be called as there are no blobs to upload in batch");
             },
@@ -2370,6 +2549,7 @@ mod tests {
             req,
             3,
             None,
+            &DashMap::new(),
             |_req| async move {
                 panic!("Not called");
             },
@@ -2411,6 +2591,7 @@ mod tests {
             req,
             0,
             None,
+            &DashMap::new(),
             |_req| async move {
                 panic!("Not called");
             },
@@ -2457,6 +2638,7 @@ mod tests {
             req,
             1,
             None,
+            &DashMap::new(),
             |_req| async move {
                 panic!("Not called");
             },
