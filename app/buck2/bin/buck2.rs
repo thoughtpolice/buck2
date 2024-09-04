@@ -38,10 +38,10 @@ use dupe::Dupe;
 // So when we set our own allocator, buck build buck2 or buck2 build buck2 often breaks.
 // Making jemalloc the default only when we do a cargo build.
 #[global_allocator]
-#[cfg(all(any(target_os = "linux", target_os = "macos"), not(buck_build)))]
+#[cfg(all(fbcode_build, any(target_os = "linux", target_os = "macos"), not(buck_build)))]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[global_allocator]
-#[cfg(target_os = "windows")]
+#[cfg(not(fbcode_build))]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn init_logging() -> anyhow::Result<Arc<dyn LogConfigurationReloadHandle>> {
