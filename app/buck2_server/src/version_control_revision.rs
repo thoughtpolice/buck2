@@ -118,21 +118,21 @@ fn reap_child(mut child: Child) {
 async fn create_revision_data() -> buck2_data::VersionControlRevision {
     let mut revision = buck2_data::VersionControlRevision::default();
     match repo_type().await {
-        Ok(repo_vcs) => {
-            match repo_vcs {
-                RepoVcs::Hg => {
-                    if let Err(e) = add_hg_data(&mut revision).await {
-                        revision.command_error = Some(e.to_string());
-                    }
-                }
-                RepoVcs::Git => {
-                    // TODO(rajneeshl): Implement the git data
-                }
-                RepoVcs::Unknown => {
-                    revision.command_error = Some("Unknown repository type".to_owned());
+        Ok(repo_vcs) => match repo_vcs {
+            RepoVcs::Hg => {
+                if let Err(e) = add_hg_data(&mut revision).await {
+                    revision.command_error = Some(e.to_string());
                 }
             }
-        }
+            RepoVcs::Git => {
+                if let Err(e) = add_git_data(&mut revision).await {
+                    revision.command_error = Some(e.to_string());
+                }
+            }
+            RepoVcs::Unknown => {
+                revision.command_error = Some("Unknown repository type".to_owned());
+            }
+        },
         Err(e) => {
             revision.command_error = Some(e.to_string());
         }
@@ -183,7 +183,7 @@ async fn add_hg_data(revision: &mut buck2_data::VersionControlRevision) -> buck2
                 ));
                 return Ok(());
             }
-            revision.has_local_changes =
+            revision.hg_has_local_changes =
                 Some(!std::str::from_utf8(&result.stdout)?.trim().is_empty());
             return Ok(());
         }
@@ -195,29 +195,109 @@ async fn add_hg_data(revision: &mut buck2_data::VersionControlRevision) -> buck2
     Ok(())
 }
 
-async fn repo_type() -> buck2_error::Result<&'static RepoVcs> {
-    static REPO_TYPE: OnceCell<buck2_error::Result<RepoVcs>> = OnceCell::const_new();
-    async fn repo_type_impl() -> buck2_error::Result<RepoVcs> {
-        let (hg_output, git_output) = tokio::join!(
-            reap_on_drop_command("hg", &["root"])?.output(),
-            reap_on_drop_command("git", &["rev-parse", "--is-inside-work-tree"])?.output()
-        );
+async fn add_git_data(
+    revision: &mut buck2_data::VersionControlRevision,
+) -> buck2_error::Result<()> {
+    // We fire 2 git commands in parallel:
+    //  The `git rev-parse HEAD` returns the full hash of the revision
+    //  The `git status --porcelain` returns if there are any local changes
+    let rev_command = reap_on_drop_command("git", &["rev-parse", "HEAD"])?;
+    let status_command = reap_on_drop_command("git", &["status", "--porcelain"])?;
 
-        let is_hg = hg_output.map_or(false, |output| {
-            std::str::from_utf8(&output.stdout).map_or(false, |s| !s.trim().is_empty())
-        });
-        let is_git = git_output.map_or(false, |output| {
-            std::str::from_utf8(&output.stdout).map_or(false, |s| s.trim() == "true")
-        });
+    let (rev_output, status_output) = tokio::join!(rev_command.output(), status_command.output());
 
-        if is_hg {
-            Ok(RepoVcs::Hg)
-        } else if is_git {
-            Ok(RepoVcs::Git)
-        } else {
-            Ok(RepoVcs::Unknown)
+    match rev_output {
+        Ok(result) => {
+            if !result.status.success() {
+                revision.command_error = Some(format!(
+                    "Command `git rev-parse HEAD` failed with error code {}; stderr:\n{}",
+                    result.status,
+                    std::str::from_utf8(&result.stderr)?
+                ));
+                return Ok(());
+            }
+            let stdout = std::str::from_utf8(&result.stdout)?.trim();
+            if stdout.len() == 40 {
+                revision.git_revision = Some(stdout.to_owned());
+            } else {
+                revision.command_error = Some(format!("Unexpected revision : {}", stdout));
+            }
+        }
+        Err(e) => {
+            revision.command_error = Some(format!(
+                "Command `git rev-parse HEAD` failed with error: {:?}",
+                e
+            ));
         }
     }
+
+    match status_output {
+        Ok(result) => {
+            if !result.status.success() {
+                revision.command_error = Some(format!(
+                    "Command `git status --porcelain` failed with error code {}; stderr:\n{}",
+                    result.status,
+                    std::str::from_utf8(&result.stderr)?
+                ));
+                return Ok(());
+            }
+            revision.git_is_dirty = Some(!std::str::from_utf8(&result.stdout)?.trim().is_empty());
+            return Ok(());
+        }
+        Err(e) => {
+            revision.command_error =
+                Some(format!("Command `git status` failed with error: {:?}", e));
+        }
+    };
+    Ok(())
+}
+
+async fn repo_type() -> buck2_error::Result<&'static RepoVcs> {
+    static REPO_TYPE: OnceCell<buck2_error::Result<RepoVcs>> = OnceCell::const_new();
+
+    async fn repo_type_impl() -> buck2_error::Result<RepoVcs> {
+        // Create futures for both VCS checks, wrapping the command creation in Result
+        let hg_future = async {
+            if let Ok(hg_command) = reap_on_drop_command("hg", &["root"]) {
+                if let Ok(output) = hg_command.output().await {
+                    if let Ok(stdout) = std::str::from_utf8(&output.stdout) {
+                        if !stdout.trim().is_empty() {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        };
+
+        let git_future = async {
+            if let Ok(git_command) =
+                reap_on_drop_command("git", &["rev-parse", "--is-inside-work-tree"])
+            {
+                if let Ok(output) = git_command.output().await {
+                    if let Ok(stdout) = std::str::from_utf8(&output.stdout) {
+                        if stdout.trim() == "true" {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        };
+
+        // Run both checks in parallel
+        let (is_hg, is_git) = tokio::join!(hg_future, git_future);
+
+        // Return the first matching VCS type
+        Ok(if is_hg {
+            RepoVcs::Hg
+        } else if is_git {
+            RepoVcs::Git
+        } else {
+            RepoVcs::Unknown
+        })
+    }
+
     REPO_TYPE
         .get_or_init(repo_type_impl)
         .await
