@@ -459,6 +459,7 @@ pub struct DaemonStartupConfig {
     pub log_download_method: LogDownloadMethod,
     pub health_check_config: HealthCheckConfig,
     pub retained_event_logs: usize,
+    pub test_builds_targets: bool,
 }
 
 impl DaemonStartupConfig {
@@ -541,6 +542,12 @@ impl DaemonStartupConfig {
                 })
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(DEFAULT_RETAINED_EVENT_LOGS),
+            test_builds_targets: config
+                .parse(BuckconfigKeyRef {
+                    section: "buck2",
+                    property: "test_builds_targets",
+                })?
+                .unwrap_or(false),
         })
     }
 
@@ -570,6 +577,7 @@ impl DaemonStartupConfig {
             },
             health_check_config: HealthCheckConfig::default(),
             retained_event_logs: DEFAULT_RETAINED_EVENT_LOGS,
+            test_builds_targets: false,
         }
     }
 }
