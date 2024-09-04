@@ -1,0 +1,67 @@
+#!/usr/bin/env dotslash
+
+{
+  "name": "buck2",
+  "platforms": {
+    "macos-aarch64": {
+      "size": 29097954,
+      "hash": "blake3",
+      "digest": "5709516d8eee1cf061752db764487d3e3d825ffa8e3e96627654eab02e98447c",
+      "format": "zst",
+      "path": "buck2-aarch64-apple-darwin",
+      "providers": [
+        {
+          "url": "https://github.com/thoughtpolice/buck2/releases/download/snapshot-20250507-040910/buck2-aarch64-apple-darwin.zst"
+        }
+      ]
+    },
+    "linux-aarch64": {
+      "size": 30279745,
+      "hash": "blake3",
+      "digest": "ec7c88e5c0501d459d633a4c7af4c58e7c157bef29751ff1c9f1031625edb1e4",
+      "format": "zst",
+      "path": "buck2-aarch64-unknown-linux-musl",
+      "providers": [
+        {
+          "url": "https://github.com/thoughtpolice/buck2/releases/download/snapshot-20250507-040910/buck2-aarch64-unknown-linux-musl.zst"
+        }
+      ]
+    },
+    "macos-x86_64": {
+      "size": 30827447,
+      "hash": "blake3",
+      "digest": "922dde459a679597e6f5278e7bc0da65eae3241054d2e8c4abf08ea01fa4008b",
+      "format": "zst",
+      "path": "buck2-x86_64-apple-darwin",
+      "providers": [
+        {
+          "url": "https://github.com/thoughtpolice/buck2/releases/download/snapshot-20250507-040910/buck2-x86_64-apple-darwin.zst"
+        }
+      ]
+    },
+    "windows-x86_64": {
+      "size": 25996556,
+      "hash": "blake3",
+      "digest": "5c1c6a6213de7a5e1dcfdf477bdeeab3f0ac3e91ca5cbda49f7131731743508e",
+      "format": "zst",
+      "path": "buck2-x86_64-pc-windows-msvc.exe",
+      "providers": [
+        {
+          "url": "https://github.com/thoughtpolice/buck2/releases/download/snapshot-20250507-040910/buck2-x86_64-pc-windows-msvc.exe.zst"
+        }
+      ]
+    },
+    "linux-x86_64": {
+      "size": 31651537,
+      "hash": "blake3",
+      "digest": "25d57ef24549ed8983babe1c402c5195df515ab6640b3f1f74b1c5571f121525",
+      "format": "zst",
+      "path": "buck2-x86_64-unknown-linux-musl",
+      "providers": [
+        {
+          "url": "https://github.com/thoughtpolice/buck2/releases/download/snapshot-20250507-040910/buck2-x86_64-unknown-linux-musl.zst"
+        }
+      ]
+    }
+  }
+}
