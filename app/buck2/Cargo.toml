@@ -13,6 +13,7 @@ blake3 = { workspace = true }
 clap = { workspace = true }
 fbinit = { workspace = true }
 hex = { workspace = true }
+mimalloc = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
@@ -71,7 +72,6 @@ buck2_forkserver = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 libc = { workspace = true }
-mimalloc = { workspace = true }
 winapi = { workspace = true }
 
 [[bin]]
