@@ -154,21 +154,19 @@ If include patterns are present, regardless of whether exclude patterns are pres
     #[clap(name = "TEST_EXECUTOR_ARGS", raw = true)]
     test_executor_args: Vec<String>,
 
-    /// Also build DefaultInfo provider, which is what `buck2 build` command builds (this is not the default)
+    /// Also build DefaultInfo provider, which is what `buck2 build` command builds
     #[clap(long, group = "default-info")]
     build_default_info: bool,
 
     /// Do not build DefaultInfo provider (this is the default)
-    #[allow(unused)]
     #[clap(long, group = "default-info")]
     skip_default_info: bool,
 
-    /// Also build RunInfo provider, which builds artifacts needed for `buck2 run` (this is not the default)
+    /// Also build RunInfo provider, which builds artifacts needed for `buck2 run`
     #[clap(long, group = "run-info")]
     build_run_info: bool,
 
     /// Do not build RunInfo provider (this is the default)
-    #[allow(unused)]
     #[clap(long, group = "run-info")]
     skip_run_info: bool,
 
@@ -205,6 +203,19 @@ impl StreamingCommand for TestCommand {
         events_ctx: &mut EventsCtx,
     ) -> ExitResult {
         let context = ctx.client_context(matches, &self)?;
+
+        let build_default_info = if cfg!(fbcode_build) {
+            self.build_default_info
+        } else {
+            !self.skip_default_info
+        };
+
+        let build_run_info = if cfg!(fbcode_build) {
+            self.build_run_info
+        } else {
+            !self.skip_run_info
+        };
+
         let response = buckd
             .with_flushing()
             .test(
@@ -228,8 +239,8 @@ impl StreamingCommand for TestCommand {
                     }),
                     timeout: self.timeout_options.overall_timeout()?,
                     ignore_tests_attribute: self.ignore_tests_attribute,
-                    build_default_info: self.build_default_info,
-                    build_run_info: self.build_run_info,
+                    build_default_info,
+                    build_run_info,
                 },
                 events_ctx,
                 ctx.console_interaction_stream(&self.common_opts.console_opts),

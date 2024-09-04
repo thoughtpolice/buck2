@@ -369,7 +369,7 @@ impl<T: PatternType> ParsedPattern<T> {
             cell_alias_resolver,
             TargetParsingOptions {
                 relative,
-                infer_target: false,
+                infer_target: true,
                 strip_package_trailing_slash: false,
             },
             pattern,
@@ -1609,7 +1609,8 @@ mod tests {
             CellRelativePath::unchecked_new("package").to_owned(),
         );
 
-        assert_matches!(
+        assert_eq!(
+            mk_target("root", "package/path", "path"),
             ParsedPattern::<TargetPatternExtra>::parse_not_relaxed(
                 "path",
                 TargetParsingRel::AllowRelative(
@@ -1618,12 +1619,12 @@ mod tests {
                 ),
                 &resolver(),
                 &alias_resolver(),
-            ),
-            Err(e) => {
-                assert!(
+             ),
+             Err(e) => {
+                 assert!(
                     format!("{e:?}").contains(&format!("{}", TargetPatternParseError::UnexpectedFormat))
-                );
-            }
+                 );
+             }
         );
 
         assert_eq!(
