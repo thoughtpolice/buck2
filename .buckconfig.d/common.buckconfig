@@ -1,6 +1,9 @@
 [cells]
 prelude = prelude
 none = none
+# NOTE: only used to pick up source files off disk for source_listing(),
+# see <https://github.com/facebook/buck2/issues/971>
+prelude_on_disk = prelude
 
 [cell_aliases]
 config = prelude
@@ -16,5 +19,8 @@ toolchains = gh_facebook_buck2_shims_meta
 [external_cells]
 prelude = bundled
 
+[build]
+execution_platforms = gh_facebook_buck2//platforms:platforms
+
 [parser]
-target_platform_detector_spec = target:root//...->prelude//platforms:default target:shim//...->prelude//platforms:default
+target_platform_detector_spec = target:root//...->gh_facebook_buck2//platforms:platforms target:shim//...->gh_facebook_buck2//platforms:platforms
