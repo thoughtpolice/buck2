@@ -7,7 +7,7 @@
  * of this source tree.
  */
 
-use gazebo::variants::VariantName;
+use gazebo::variants::VariantName as _;
 
 use crate::impls::core::graph::storage::ValueReusable;
 use crate::impls::core::internals::CoreState;
