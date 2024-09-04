@@ -276,11 +276,12 @@ pub enum Compressor {
 
 impl Compressor {
     fn from_grpc(val: i32) -> Option<Self> {
-        // TODO: brotli cannot be supported until google proto definitions are updated
         if val == compressor::Value::Zstd as i32 {
             Some(Self::Zstd)
         } else if val == compressor::Value::Deflate as i32 {
             Some(Self::Deflate)
+        } else if val == compressor::Value::Brotli as i32 {
+            Some(Self::Brotli)
         } else {
             None
         }
@@ -383,10 +384,6 @@ impl REClientBuilder {
             }
         };
 
-        if !capabilities.exec_enabled {
-            return Err(anyhow::anyhow!("Server has remote execution disabled."));
-        }
-
         let max_decoding_msg_size = opts
             .max_decoding_message_size
             .unwrap_or(capabilities.max_total_batch_size * 2);
@@ -398,12 +395,16 @@ impl REClientBuilder {
         }
 
         // Choose a ByteStream compressor
-        // TODO: brotli cannot be supported until google proto definitions are updated
         let bystream_compressor = if capabilities
             .supported_compressors
             .contains(&Compressor::Zstd)
         {
             Some(Compressor::Zstd)
+        } else if capabilities
+            .supported_compressors
+            .contains(&Compressor::Brotli)
+        {
+            Some(Compressor::Brotli)
         } else if capabilities
             .supported_compressors
             .contains(&Compressor::Deflate)
@@ -1315,9 +1316,21 @@ where
             // Wrap the blob reader in a compression reader
             let reader: Pin<Box<dyn AsyncRead + Unpin + Send>> = match bystream_compressor {
                 None => Pin::new(Box::new(blob_reader)),
-                Some(Compressor::Zstd) => Pin::new(Box::new(ZstdDecoder::new(blob_reader))),
-                Some(Compressor::Deflate) => Pin::new(Box::new(DeflateDecoder::new(blob_reader))),
-                Some(Compressor::Brotli) => Pin::new(Box::new(BrotliDecoder::new(blob_reader))),
+                Some(Compressor::Zstd) => {
+                    let mut decoder = ZstdDecoder::new(blob_reader);
+                    decoder.multiple_members(true);
+                    Pin::new(Box::new(decoder))
+                }
+                Some(Compressor::Deflate) => {
+                    let mut decoder = DeflateDecoder::new(blob_reader);
+                    decoder.multiple_members(true);
+                    Pin::new(Box::new(decoder))
+                }
+                Some(Compressor::Brotli) => {
+                    let mut decoder = BrotliDecoder::new(blob_reader);
+                    decoder.multiple_members(true);
+                    Pin::new(Box::new(decoder))
+                }
             };
 
             reader
