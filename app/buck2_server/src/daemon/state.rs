@@ -553,6 +553,10 @@ impl DaemonState {
                 Some(paths.re_logs_dir()),
                 paths.buck_out_path(),
                 init_ctx.daemon_startup_config.paranoid,
+                digest_config
+                    .cas_digest_config()
+                    .preferred_algorithm()
+                    .to_re_digest_function(),
             ));
             // Used only to dispatch events to scribe that are not associated with a specific command (ex. materializer clean up events)
             let daemon_dispatcher = if let Some(sink) = scribe_sink.dupe() {
