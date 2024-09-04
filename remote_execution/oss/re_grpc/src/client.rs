@@ -299,7 +299,10 @@ impl Compressor {
 pub struct REClientBuilder;
 
 impl REClientBuilder {
-    pub async fn build_and_connect(opts: &Buck2OssReConfiguration) -> anyhow::Result<REClient> {
+    pub async fn build_and_connect(
+        opts: &Buck2OssReConfiguration,
+        digest_function: i32,
+    ) -> anyhow::Result<REClient> {
         // We just always create this just in case, so that we implicitly validate it if set.
         let tls_config = create_tls_config(opts)
             .await
@@ -373,6 +376,7 @@ impl REClientBuilder {
                 &mut capabilities_client,
                 &instance_name,
                 opts.max_total_batch_size,
+                digest_function,
             )
             .await?
         } else {
@@ -439,12 +443,13 @@ impl REClientBuilder {
                 max_concurrent_uploads_per_action: opts.max_concurrent_uploads_per_action,
                 // NOTE: This is an arbitrary number because RBE does not return information
                 // on the TTL of the remote blob.
-                cas_ttl_secs: opts.cas_ttl_secs.unwrap_or(60),
+                cas_ttl_secs: opts.cas_ttl_secs.unwrap_or(3 * 60 * 60),
             },
             grpc_clients,
             capabilities,
             instance_name,
             bystream_compressor,
+            digest_function,
         ))
     }
 
@@ -452,9 +457,8 @@ impl REClientBuilder {
         client: &mut CapabilitiesClient<GrpcService>,
         instance_name: &InstanceName,
         max_total_batch_size: Option<usize>,
+        digest_function: i32,
     ) -> anyhow::Result<RECapabilities> {
-        // TODO use more of the capabilities of the remote build executor
-
         let resp = client
             .get_capabilities(GetCapabilitiesRequest {
                 instance_name: instance_name.as_str().to_owned(),
@@ -464,6 +468,18 @@ impl REClientBuilder {
             .into_inner();
 
         let supported_compressors = if let Some(cache_cap) = &resp.cache_capabilities {
+            // Validate that the server supports our configured digest function.
+            if !cache_cap.digest_functions.is_empty()
+                && !cache_cap.digest_functions.contains(&digest_function)
+            {
+                return Err(anyhow::anyhow!(
+                    "Remote execution server does not support digest function {} \
+                     (server supports: {:?})",
+                    digest_function,
+                    cache_cap.digest_functions
+                ));
+            }
+
             cache_cap
                 .supported_compressors
                 .iter()
@@ -593,6 +609,20 @@ pub struct REClient {
     // buck2 calls find_missing for same blobs
     find_missing_cache: Mutex<FindMissingCache>,
     bystream_compressor: Option<Compressor>,
+    /// Proto `DigestFunction.Value` as `i32` (e.g. 1=SHA256, 2=SHA1, 9=BLAKE3).
+    digest_function: i32,
+    /// Resource name component for bytestream paths, e.g. `Some("blake3")` or `None`.
+    digest_function_resource_name: Option<String>,
+}
+
+/// Map a proto `DigestFunction.Value` to the resource name component that must
+/// appear in ByteStream paths, or `None` when the spec says to omit it.
+fn digest_function_to_resource_name(digest_function: i32) -> Option<String> {
+    match digest_function {
+        9 => Some("blake3".to_owned()),
+        8 => Some("sha256tree".to_owned()),
+        _ => None,
+    }
 }
 
 impl Drop for REClient {
@@ -663,7 +693,9 @@ impl REClient {
         capabilities: RECapabilities,
         instance_name: InstanceName,
         bystream_compressor: Option<Compressor>,
+        digest_function: i32,
     ) -> Self {
+        let digest_function_resource_name = digest_function_to_resource_name(digest_function);
         REClient {
             runtime_opts,
             grpc_clients,
@@ -675,6 +707,8 @@ impl REClient {
                 last_check: Instant::now(),
             }),
             bystream_compressor,
+            digest_function,
+            digest_function_resource_name,
         }
     }
 
@@ -690,6 +724,7 @@ impl REClient {
                 GetActionResultRequest {
                     instance_name: self.instance_name.as_str().to_owned(),
                     action_digest: Some(tdigest_to(request.digest)),
+                    digest_function: self.digest_function,
                     ..Default::default()
                 },
                 metadata,
@@ -717,6 +752,7 @@ impl REClient {
                     action_digest: Some(tdigest_to(request.action_digest)),
                     action_result: Some(convert_t_action_result2(request.action_result)?),
                     results_cache_policy: None,
+                    digest_function: self.digest_function,
                     ..Default::default()
                 },
                 metadata,
@@ -744,7 +780,7 @@ impl REClient {
 
         let request = GExecuteRequest {
             instance_name: self.instance_name.as_str().to_owned(),
-            skip_cache_lookup: false,
+            skip_cache_lookup: execute_request.skip_cache_lookup,
             execution_policy: Some(ExecutionPolicy {
                 priority: execute_request
                     .execution_policy
@@ -753,6 +789,7 @@ impl REClient {
             }),
             results_cache_policy: Some(ResultsCachePolicy { priority: 0 }),
             action_digest: Some(action_digest.clone()),
+            digest_function: self.digest_function,
             ..Default::default()
         };
 
@@ -870,6 +907,8 @@ impl REClient {
             self.bystream_compressor,
             self.capabilities.max_total_batch_size,
             self.runtime_opts.max_concurrent_uploads_per_action,
+            self.digest_function,
+            self.digest_function_resource_name.as_deref(),
             |re_request| async {
                 let metadata = metadata.clone();
                 let mut cas_client = self.grpc_clients.cas_client.clone();
@@ -935,6 +974,8 @@ impl REClient {
             request,
             self.bystream_compressor,
             self.capabilities.max_total_batch_size,
+            self.digest_function,
+            self.digest_function_resource_name.as_deref(),
             |re_request| async {
                 let metadata = metadata.clone();
                 let mut client = self.grpc_clients.cas_client.clone();
@@ -1002,6 +1043,7 @@ impl REClient {
                         FindMissingBlobsRequest {
                             instance_name: self.instance_name.as_str().to_owned(),
                             blob_digests: digests_to_check.map(|b| tdigest_to(b.clone())),
+                            digest_function: self.digest_function,
                             ..Default::default()
                         },
                         metadata.clone(),
@@ -1264,6 +1306,8 @@ async fn download_impl<Byt, BytRet, Cas>(
     request: DownloadRequest,
     bystream_compressor: Option<Compressor>,
     max_total_batch_size: usize,
+    digest_function: i32,
+    digest_fn_name: Option<&str>,
     cas_f: impl Fn(BatchReadBlobsRequest) -> Cas,
     bystream_fut: impl Fn(ReadRequest) -> Byt + Sync + Send + Copy,
 ) -> anyhow::Result<DownloadResponse>
@@ -1276,19 +1320,25 @@ where
         instance_name: &InstanceName,
         compressor: Option<Compressor>,
         digest: &TDigest,
+        digest_fn_name: Option<&str>,
     ) -> String {
+        let df = digest_fn_name
+            .map(|n| format!("{n}/"))
+            .unwrap_or_default();
         if let Some(compressor) = compressor {
             format!(
-                "{}compressed-blobs/{}/{}/{}",
+                "{}compressed-blobs/{}/{}{}/{}",
                 instance_name.as_resource_prefix(),
                 compressor.name(),
+                df,
                 digest.hash,
                 digest.size_in_bytes,
             )
         } else {
             format!(
-                "{}blobs/{}/{}",
+                "{}blobs/{}{}/{}",
                 instance_name.as_resource_prefix(),
+                df,
                 digest.hash,
                 digest.size_in_bytes,
             )
@@ -1296,7 +1346,7 @@ where
     }
 
     let bystream_fut = |digest: TDigest| async move {
-        let resource_name = resource_name(&instance_name, bystream_compressor, &digest);
+        let resource_name = resource_name(&instance_name, bystream_compressor, &digest, digest_fn_name);
 
         bystream_fut(ReadRequest {
             resource_name: resource_name.clone(),
@@ -1358,6 +1408,7 @@ where
                 instance_name: instance_name.as_str().to_owned(),
                 digests: std::mem::take(&mut curr_digests),
                 acceptable_compressors: vec![compressor::Value::Identity as i32],
+                digest_function,
                 ..Default::default()
             };
             requests.push(read_blob_req);
@@ -1371,6 +1422,7 @@ where
             instance_name: instance_name.as_str().to_owned(),
             digests: std::mem::take(&mut curr_digests),
             acceptable_compressors: vec![compressor::Value::Identity as i32],
+            digest_function,
             ..Default::default()
         };
         requests.push(read_blob_req);
@@ -1476,6 +1528,8 @@ async fn upload_impl<Byt, Cas>(
     bystream_compressor: Option<Compressor>,
     max_total_batch_size: usize,
     max_concurrent_uploads: Option<usize>,
+    digest_function: i32,
+    digest_fn_name: Option<&str>,
     cas_f: impl Fn(BatchUpdateBlobsRequest) -> Cas + Sync + Send + Copy,
     bystream_fut: impl Fn(Vec<WriteRequest>) -> Byt + Sync + Send + Copy,
 ) -> anyhow::Result<UploadResponse>
@@ -1488,21 +1542,27 @@ where
         client_uuid: &str,
         compressor: Option<Compressor>,
         digest: &TDigest,
+        digest_fn_name: Option<&str>,
     ) -> String {
+        let df = digest_fn_name
+            .map(|n| format!("{n}/"))
+            .unwrap_or_default();
         if let Some(compressor) = compressor {
             format!(
-                "{}uploads/{}/compressed-blobs/{}/{}/{}",
+                "{}uploads/{}/compressed-blobs/{}/{}{}/{}",
                 instance_name.as_resource_prefix(),
                 client_uuid,
                 compressor.name(),
+                df,
                 digest.hash,
                 digest.size_in_bytes,
             )
         } else {
             format!(
-                "{}uploads/{}/blobs/{}/{}",
+                "{}uploads/{}/blobs/{}{}/{}",
                 instance_name.as_resource_prefix(),
                 client_uuid,
+                df,
                 digest.hash,
                 digest.size_in_bytes,
             )
@@ -1529,7 +1589,7 @@ where
         let mut upload_segments = Vec::new();
         let mut buf = vec![0; max_total_batch_size];
         loop {
-            let n_read = reader.read(&mut buf).await.unwrap();
+            let n_read = reader.read(&mut buf).await?;
             if n_read == 0 {
                 break;
             }
@@ -1577,6 +1637,7 @@ where
             &client_uuid,
             bystream_compressor,
             &blob.digest,
+            digest_fn_name,
         );
         let fut = async move {
             bystream_fut(resource_name, Box::new(Cursor::new(data))).await?;
@@ -1601,6 +1662,7 @@ where
             &client_uuid,
             bystream_compressor,
             &file.digest,
+            digest_fn_name,
         );
 
         let fut = async move {
@@ -1622,6 +1684,7 @@ where
             let mut re_request = BatchUpdateBlobsRequest {
                 instance_name: instance_name.as_str().to_owned(),
                 requests: vec![],
+                digest_function,
                 ..Default::default()
             };
             for blob in batch {
@@ -1637,7 +1700,7 @@ where
                         // These should be small files, so no need to use a buffered reader.
                         let mut fin = tokio::fs::File::open(&file.name)
                             .await
-                            .with_context(|| format!("Opening {} for writing failed", file.name))?;
+                            .with_context(|| format!("Opening {} for reading failed", file.name))?;
                         let mut data = vec![];
                         fin.read_to_end(&mut data).await?;
 
@@ -1882,6 +1945,8 @@ mod tests {
             req,
             None,
             10000,
+            1,
+            None,
             |req| {
                 let res = res.clone();
                 let digest1 = digest1.clone();
@@ -1989,6 +2054,8 @@ mod tests {
             req,
             None,
             10, // kept small to simulate a large file download
+            1,
+            None,
             |req| {
                 let res = res.clone();
                 let digest1 = digest1.clone();
@@ -2071,6 +2138,8 @@ mod tests {
             req,
             None,
             100000,
+            1,
+            None,
             |req| {
                 let res = res.clone();
                 let digest1 = digest1.clone();
@@ -2158,6 +2227,8 @@ mod tests {
             req,
             None,
             7,
+            1,
+            None,
             |req| {
                 counter.fetch_add(1, Ordering::Relaxed);
                 let res = BatchReadBlobsResponse {
@@ -2227,6 +2298,8 @@ mod tests {
             req,
             None,
             10, // intentionally small value to keep data in the test blobs small
+            1,
+            None,
             |req| {
                 let res = res.clone();
                 let digest1 = digest1.clone();
@@ -2283,6 +2356,8 @@ mod tests {
             req,
             None,
             100000,
+            1,
+            None,
             |req| {
                 let res = res.clone();
                 async move {
@@ -2322,6 +2397,8 @@ mod tests {
             req,
             None,
             0,
+            1,
+            None,
             |_req| async { panic!("not called") },
             |req| async move {
                 assert_eq!(req.resource_name, "instance/blobs/aa/0");
@@ -2392,6 +2469,8 @@ mod tests {
             req,
             None,
             10000,
+            None,
+            1,
             None,
             |req| {
                 let res = res.clone();
@@ -2477,6 +2556,8 @@ mod tests {
             None,
             10, // kept small to simulate a large file upload
             None,
+            1,
+            None,
             |req| {
                 let res = res.clone();
                 let digest1 = digest1.clone();
@@ -2552,6 +2633,8 @@ mod tests {
             None,
             10, // kept small to simulate a large inlined upload
             None,
+            1,
+            None,
             |req| {
                 let res = res.clone();
                 let digest1 = digest1.clone();
@@ -2613,6 +2696,8 @@ mod tests {
             req,
             None,
             10,
+            None,
+            1,
             None,
             |_req| async move {
                 panic!("This should not be called as there are no blobs to upload in batch");
@@ -2676,6 +2761,8 @@ mod tests {
             None,
             3,
             None,
+            1,
+            None,
             |_req| async move {
                 panic!("Not called");
             },
@@ -2723,6 +2810,8 @@ mod tests {
                     compressor,
                     0, // max_total_batch_size=0 forces bytestream API
                     None,
+                    1,
+                    None,
                     |_req| async move {
                         panic!("Not called");
                     },
@@ -2747,6 +2836,8 @@ mod tests {
                     },
                     compressor,
                     1024, // forces the batch API
+                    None,
+                    1,
                     None,
                     |_req| async move {
                         panic!("Not called");
@@ -2795,6 +2886,8 @@ mod tests {
             None,
             1,
             None,
+            1,
+            None,
             |_req| async move {
                 panic!("Not called");
             },
@@ -2840,6 +2933,8 @@ mod tests {
             &InstanceName(Some("instance".to_owned())),
             req,
             Some(Compressor::Zstd),
+            1,
+            None,
             1,
             None,
             |_req| async move {
@@ -2912,6 +3007,8 @@ async fn test_upload_compressed() -> anyhow::Result<()> {
         Some(Compressor::Zstd),
         1,
         None,
+        1,
+        None,
         |_req| async move {
             panic!("Not called");
         },
@@ -2958,6 +3055,8 @@ async fn test_download_compressed() -> anyhow::Result<()> {
         },
         Some(Compressor::Zstd),
         10,
+        1,
+        None,
         |_req| async { panic!("not called") },
         |_req| async move {
             Ok(Box::pin(futures::stream::iter(
