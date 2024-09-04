@@ -51,8 +51,29 @@ struct Stats {
     system_total_memory_bytes: Option<u64>,
     re_max_download_speeds: Vec<SlidingWindow>,
     re_max_upload_speeds: Vec<SlidingWindow>,
-    hg_revision: Option<String>,
-    has_local_changes: Option<bool>,
+    vcs_info: VcsInformation,
+}
+
+enum VcsInformation {
+    Hg {
+        revision: String,
+        has_local_changes: bool,
+    },
+    Jujutsu {
+        change_id: String,
+        commit_id: String,
+    },
+    Git {
+        revision: String,
+        is_dirty: bool,
+    },
+    Unknown,
+}
+
+impl Default for VcsInformation {
+    fn default() -> Self {
+        Self::Unknown
+    }
 }
 
 impl Stats {
@@ -112,17 +133,27 @@ impl Stats {
                         self.system_total_memory_bytes = system_info.system_total_memory_bytes;
                     }
                     Some(buck2_data::instant_event::Data::VersionControlRevision(vcs)) => {
-                        match vcs.hg_revision {
-                            Some(ref revision) => {
-                                self.hg_revision = Some(revision.clone());
-                            }
-                            None => {}
-                        }
-                        match vcs.has_local_changes {
-                            Some(ref has_local_changes) => {
-                                self.has_local_changes = Some(*has_local_changes);
-                            }
-                            None => {}
+                        if let (Some(revision), Some(has_local_changes)) =
+                            (vcs.hg_revision.as_ref(), vcs.hg_has_local_changes)
+                        {
+                            self.vcs_info = VcsInformation::Hg {
+                                revision: revision.clone(),
+                                has_local_changes,
+                            };
+                        } else if let (Some(change_id), Some(commit_id)) =
+                            (vcs.jj_change_id.as_ref(), vcs.jj_commit_id.as_ref())
+                        {
+                            self.vcs_info = VcsInformation::Jujutsu {
+                                change_id: change_id.clone(),
+                                commit_id: commit_id.clone(),
+                            };
+                        } else if let (Some(revision), Some(is_dirty)) =
+                            (vcs.git_revision.as_ref(), vcs.git_is_dirty)
+                        {
+                            self.vcs_info = VcsInformation::Git {
+                                revision: revision.clone(),
+                                is_dirty,
+                            };
                         }
                     }
                     _ => {}
@@ -224,14 +255,28 @@ impl Display for Stats {
         } else {
             // TODO(ezgi): when there is no CommandEnd, take the timestamp from the last event and calculate the duration
         }
-        if let Some(hg_revision) = &self.hg_revision {
-            writeln!(f, "hg revision: {}", hg_revision)?;
-        }
-
-        if let Some(has_local_changes) = self.has_local_changes {
-            writeln!(f, "has local changes: {}", has_local_changes)?;
-        } else {
-            writeln!(f, "has local changes: unknown")?;
+        match &self.vcs_info {
+            VcsInformation::Hg {
+                revision,
+                has_local_changes,
+            } => {
+                writeln!(f, "hg revision: {}", revision)?;
+                writeln!(f, "has local changes: {}", has_local_changes)?;
+            }
+            VcsInformation::Jujutsu {
+                change_id,
+                commit_id,
+            } => {
+                writeln!(f, "jj @ change id: {}", change_id)?;
+                writeln!(f, "jj @ commit id: {}", commit_id)?;
+            }
+            VcsInformation::Git { revision, is_dirty } => {
+                writeln!(f, "git revision: {}", revision)?;
+                writeln!(f, "has local changes: {}", is_dirty)?;
+            }
+            VcsInformation::Unknown => {
+                writeln!(f, "vcs info: unknown")?;
+            }
         }
         Ok(())
     }
