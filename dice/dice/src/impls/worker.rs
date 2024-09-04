@@ -319,7 +319,7 @@ impl DiceTaskWorker {
     skip(eval, cycles),
     fields(version = %eval.per_live_version_ctx.get_version(), version = %version)
 ))]
-pub(crate) async fn check_dependencies<'a>(
+async fn check_dependencies<'a>(
     eval: &'a AsyncEvaluator,
     parent_key: ParentKey,
     deps: &'a SeriesParallelDeps,
