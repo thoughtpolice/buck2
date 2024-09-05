@@ -1,5 +1,105 @@
 <div class="title-block" style="text-align: center;" align="center">
 
+# WARNING: This is a fork of Buck2!
+
+</div>
+
+This is my temporary fork of Buck2, a build system by Meta. It currently
+contains several patches that are currently queued to go upstream, to unblock me
+from future work. **This is not intended to be long-term or compete with
+upstream**. Rather, it is only an aggregation of in-flight patches, for testing
+and use, before they are in a bi-montly pre-release.
+
+[Check the list of patches](https://github.com/facebook/buck2/compare/main...thoughtpolice:buck2:main)
+to see what's there.
+
+## Basic usage of this fork
+
+Install [DotSlash](https://dotslash-cli.com):
+
+```
+cargo install --locked dotslash  
+```
+
+Clone the repo. Then, from inside of it:
+
+```bash
+# on linux/macos
+export PATH=$PWD/bootstrap:$PATH
+```
+
+```pwsh
+# on windows
+$env:Path += ";$((Get-Item .).FullName)\bootstrap"
+```
+
+Now build:
+
+```
+buck2 build //:buck2
+```
+
+### Specific points
+
+This fork:
+
+- Uses `mimalloc` instead of `jemalloc` for all OSS builds
+  - Easier to build, improves performance everywhere
+- Tuned for building `buck2` with `buck2`+`rust-project`
+  - If you have `direnv`, then `buck2 build //:buck2` should Just Work
+  - Automatic OOTB configs [VSCode](https://code.visualstudio.com) via `rust-project`
+  - OOTB config for [Helix](https://helix-editor.com/) **BUT** you must use direnv
+- Includes various bug or usability fixes that are not yet upstream (or may not
+  yet be high enough quality for upstream)
+- RBE capable and tested with [BuildBuddy](https://buildbuddy.io)
+
+### Remote builds
+
+**Buildbuddy example**: write out a scratch `.buckconfig.local` file like so
+(with your remote API key):
+
+```ini
+[buck2_re_client]
+address = grpc://remote.buildbuddy.io
+http_headers = x-buildbuddy-api-key:$BB_API_KEY
+```
+
+Make sure the buck2 daemon is dead before setting `BB_API_KEY` in your
+environment. Then, on Linux:
+
+```
+buck2 build --prefer-remote -c buck2_re_client.enabled=true //:buck2
+```
+
+## Releases
+
+If you want to download binaries from this fork, check the **[Releases]** page,
+which will contain binaries and corresponding [DotSlash] files.
+
+[Releases]: https://github.com/thoughtpolice/buck2/releases
+[DotSlash]: https://dotslash-cli.com
+
+The goal of this repository is to eventually be obsolete. I rebase `main` and my
+own PRs very frequently.
+
+## Please please please
+
+Please please please do not:
+
+- Make PRs on this repo,
+- Open issues on this repo,
+- Clone or rely on `main` being stable in this repo,
+- **Make forks/branches of `main` or anything other branch here**!
+
+If you have questions or want a patch integrated, please ask me, `@aseipp`, on
+the **[Buck2 Discord](https://discord.com/invite/RdcZczTzb8)**.
+
+The untouched README from upstream follows below.
+
+---
+
+<div class="title-block" style="text-align: center;" align="center">
+
 # Buck2: fast multi-language build system
 
 ![Version] ![License] [![Build Status]][CI]
