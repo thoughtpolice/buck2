@@ -1,5 +1,51 @@
 <div class="title-block" style="text-align: center;" align="center">
 
+# WARNING: This is a fork of Buck2!
+
+</div>
+
+This is my temporary fork of Buck2, a build system by Meta. It currently
+contains several patches that are currently queued to go upstream, to unblock me
+from future work. **This is not intended to be long-term or compete with
+upstream**. Rather, it is only an aggregation of in-flight patches, for testing
+and use, before they are in a bi-montly pre-release.
+
+This branch currently maintains copies of the following patches, applied/rebased
+on top of the latest trunk:
+
+- <https://github.com/facebook/buck2/pull/770>
+- <https://github.com/facebook/buck2/pull/769>
+- <https://github.com/facebook/buck2/pull/765>
+- <https://github.com/facebook/buck2/pull/764>
+- <https://github.com/facebook/buck2/pull/743>
+- <https://github.com/facebook/buck2/pull/784>
+
+Again: patches not intended for upstream ARE NOT available in this fork.
+
+If you want to download binaries from this fork, check the **[Releases]** page,
+which will contain binaries and corresponding [DotSlash] files.
+
+[Releases]: https://github.com/thoughtpolice/buck2/releases
+[DotSlash]: https://dotslash-cli.com
+
+The goal of this repository is to eventually be obsolete. I rebase `main` and my
+own PRs very frequently.
+
+Please do not:
+
+- Make PRs on this repo,
+- Open issues on this repo,
+- **Make forks/branches of `main` or anything other branch here**!
+
+If you have questions or want a patch integrated, please ask me, `@aseipp`, on
+the **[Buck2 Discord](https://discord.com/invite/RdcZczTzb8)**.
+
+The untouched README from upstream follows below.
+
+---
+
+<div class="title-block" style="text-align: center;" align="center">
+
 # Buck2: fast multi-language build system
 
 ![Version] ![License] [![Build Status]][CI]
