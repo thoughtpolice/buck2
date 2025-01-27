@@ -51,8 +51,21 @@ struct Stats {
     system_total_memory_bytes: Option<u64>,
     re_max_download_speeds: Vec<SlidingWindow>,
     re_max_upload_speeds: Vec<SlidingWindow>,
-    hg_revision: Option<String>,
-    has_local_changes: Option<bool>,
+    vcs_info: VcsInformation,
+}
+
+enum VcsInformation {
+    Hg {
+        revision: String,
+        has_local_changes: bool,
+    },
+    Unknown,
+}
+
+impl Default for VcsInformation {
+    fn default() -> Self {
+        Self::Unknown
+    }
 }
 
 impl Stats {
@@ -112,17 +125,13 @@ impl Stats {
                         self.system_total_memory_bytes = system_info.system_total_memory_bytes;
                     }
                     Some(buck2_data::instant_event::Data::VersionControlRevision(vcs)) => {
-                        match vcs.hg_revision {
-                            Some(ref revision) => {
-                                self.hg_revision = Some(revision.clone());
-                            }
-                            None => {}
-                        }
-                        match vcs.has_local_changes {
-                            Some(ref has_local_changes) => {
-                                self.has_local_changes = Some(*has_local_changes);
-                            }
-                            None => {}
+                        if let (Some(revision), Some(has_local_changes)) =
+                            (vcs.hg_revision.as_ref(), vcs.hg_has_local_changes)
+                        {
+                            self.vcs_info = VcsInformation::Hg {
+                                revision: revision.clone(),
+                                has_local_changes,
+                            };
                         }
                     }
                     _ => {}
@@ -224,14 +233,17 @@ impl Display for Stats {
         } else {
             // TODO(ezgi): when there is no CommandEnd, take the timestamp from the last event and calculate the duration
         }
-        if let Some(hg_revision) = &self.hg_revision {
-            writeln!(f, "hg revision: {}", hg_revision)?;
-        }
-
-        if let Some(has_local_changes) = self.has_local_changes {
-            writeln!(f, "has local changes: {}", has_local_changes)?;
-        } else {
-            writeln!(f, "has local changes: unknown")?;
+        match &self.vcs_info {
+            VcsInformation::Hg {
+                revision,
+                has_local_changes,
+            } => {
+                writeln!(f, "hg revision: {}", revision)?;
+                writeln!(f, "has local changes: {}", has_local_changes)?;
+            }
+            VcsInformation::Unknown => {
+                writeln!(f, "vcs info: unknown")?;
+            }
         }
         Ok(())
     }
