@@ -108,7 +108,7 @@ async fn add_hg_data(revision: &mut buck2_data::VersionControlRevision) -> buck2
                 ));
                 return Ok(());
             }
-            revision.has_local_changes =
+            revision.hg_has_local_changes =
                 Some(!std::str::from_utf8(&result.stdout)?.trim().is_empty());
             return Ok(());
         }
@@ -122,27 +122,50 @@ async fn add_hg_data(revision: &mut buck2_data::VersionControlRevision) -> buck2
 
 async fn repo_type() -> buck2_error::Result<&'static RepoVcs> {
     static REPO_TYPE: OnceCell<buck2_error::Result<RepoVcs>> = OnceCell::const_new();
+
     async fn repo_type_impl() -> buck2_error::Result<RepoVcs> {
-        let (hg_output, git_output) = tokio::join!(
-            reap_on_drop_command("hg", &["root"])?.output(),
-            reap_on_drop_command("git", &["rev-parse", "--is-inside-work-tree"])?.output()
-        );
+        // Create futures for both VCS checks, wrapping the command creation in Result
+        let hg_future = async {
+            if let Ok(hg_command) = reap_on_drop_command("hg", &["root"]) {
+                if let Ok(output) = hg_command.output().await {
+                    if let Ok(stdout) = std::str::from_utf8(&output.stdout) {
+                        if !stdout.trim().is_empty() {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        };
 
-        let is_hg = hg_output.map_or(false, |output| {
-            std::str::from_utf8(&output.stdout).map_or(false, |s| !s.trim().is_empty())
-        });
-        let is_git = git_output.map_or(false, |output| {
-            std::str::from_utf8(&output.stdout).map_or(false, |s| s.trim() == "true")
-        });
+        let git_future = async {
+            if let Ok(git_command) =
+                reap_on_drop_command("git", &["rev-parse", "--is-inside-work-tree"])
+            {
+                if let Ok(output) = git_command.output().await {
+                    if let Ok(stdout) = std::str::from_utf8(&output.stdout) {
+                        if stdout.trim() == "true" {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        };
 
-        if is_hg {
-            Ok(RepoVcs::Hg)
+        // Run both checks in parallel
+        let (is_hg, is_git) = tokio::join!(hg_future, git_future);
+
+        // Return the first matching VCS type
+        Ok(if is_hg {
+            RepoVcs::Hg
         } else if is_git {
-            Ok(RepoVcs::Git)
+            RepoVcs::Git
         } else {
-            Ok(RepoVcs::Unknown)
-        }
+            RepoVcs::Unknown
+        })
     }
+
     REPO_TYPE
         .get_or_init(repo_type_impl)
         .await
