@@ -642,6 +642,10 @@ message VersionControlRevision {
   // Unset: Unknown state.
   optional bool hg_has_local_changes = 2;
   optional string command_error = 3;
+
+  optional string git_revision = 4;
+  optional string git_branch = 5;
+  optional bool git_is_dirty = 6;
 }
 
 // Event sent during build commands
