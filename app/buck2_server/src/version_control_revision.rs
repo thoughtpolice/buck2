@@ -43,21 +43,21 @@ enum RepoVcs {
 async fn create_revision_data() -> buck2_data::VersionControlRevision {
     let mut revision = buck2_data::VersionControlRevision::default();
     match repo_type().await {
-        Ok(repo_vcs) => {
-            match repo_vcs {
-                RepoVcs::Hg => {
-                    if let Err(e) = add_hg_data(&mut revision).await {
-                        revision.command_error = Some(e.to_string());
-                    }
-                }
-                RepoVcs::Git => {
-                    // TODO(rajneeshl): Implement the git data
-                }
-                RepoVcs::Unknown => {
-                    revision.command_error = Some("Unknown repository type".to_owned());
+        Ok(repo_vcs) => match repo_vcs {
+            RepoVcs::Hg => {
+                if let Err(e) = add_hg_data(&mut revision).await {
+                    revision.command_error = Some(e.to_string());
                 }
             }
-        }
+            RepoVcs::Git => {
+                if let Err(e) = add_git_data(&mut revision).await {
+                    revision.command_error = Some(e.to_string());
+                }
+            }
+            RepoVcs::Unknown => {
+                revision.command_error = Some("Unknown repository type".to_owned());
+            }
+        },
         Err(e) => {
             revision.command_error = Some(e.to_string());
         }
@@ -115,6 +115,63 @@ async fn add_hg_data(revision: &mut buck2_data::VersionControlRevision) -> buck2
         Err(e) => {
             revision.command_error =
                 Some(format!("Command `hg status` failed with error: {:?}", e));
+        }
+    };
+    Ok(())
+}
+
+async fn add_git_data(
+    revision: &mut buck2_data::VersionControlRevision,
+) -> buck2_error::Result<()> {
+    // We fire 2 git commands in parallel:
+    //  The `git rev-parse HEAD` returns the full hash of the revision
+    //  The `git status --porcelain` returns if there are any local changes
+    let rev_command = reap_on_drop_command("git", &["rev-parse", "HEAD"])?;
+    let status_command = reap_on_drop_command("git", &["status", "--porcelain"])?;
+
+    let (rev_output, status_output) = tokio::join!(rev_command.output(), status_command.output());
+
+    match rev_output {
+        Ok(result) => {
+            if !result.status.success() {
+                revision.command_error = Some(format!(
+                    "Command `git rev-parse HEAD` failed with error code {}; stderr:\n{}",
+                    result.status,
+                    std::str::from_utf8(&result.stderr)?
+                ));
+                return Ok(());
+            }
+            let stdout = std::str::from_utf8(&result.stdout)?.trim();
+            if stdout.len() == 40 {
+                revision.git_revision = Some(stdout.to_owned());
+            } else {
+                revision.command_error = Some(format!("Unexpected revision : {}", stdout));
+            }
+        }
+        Err(e) => {
+            revision.command_error = Some(format!(
+                "Command `git rev-parse HEAD` failed with error: {:?}",
+                e
+            ));
+        }
+    }
+
+    match status_output {
+        Ok(result) => {
+            if !result.status.success() {
+                revision.command_error = Some(format!(
+                    "Command `git status --porcelain` failed with error code {}; stderr:\n{}",
+                    result.status,
+                    std::str::from_utf8(&result.stderr)?
+                ));
+                return Ok(());
+            }
+            revision.git_is_dirty = Some(!std::str::from_utf8(&result.stdout)?.trim().is_empty());
+            return Ok(());
+        }
+        Err(e) => {
+            revision.command_error =
+                Some(format!("Command `git status` failed with error: {:?}", e));
         }
     };
     Ok(())

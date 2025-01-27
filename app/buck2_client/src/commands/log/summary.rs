@@ -59,6 +59,10 @@ enum VcsInformation {
         revision: String,
         has_local_changes: bool,
     },
+    Git {
+        revision: String,
+        is_dirty: bool,
+    },
     Unknown,
 }
 
@@ -131,6 +135,13 @@ impl Stats {
                             self.vcs_info = VcsInformation::Hg {
                                 revision: revision.clone(),
                                 has_local_changes,
+                            };
+                        } else if let (Some(revision), Some(is_dirty)) =
+                            (vcs.git_revision.as_ref(), vcs.git_is_dirty)
+                        {
+                            self.vcs_info = VcsInformation::Git {
+                                revision: revision.clone(),
+                                is_dirty,
                             };
                         }
                     }
@@ -240,6 +251,10 @@ impl Display for Stats {
             } => {
                 writeln!(f, "hg revision: {}", revision)?;
                 writeln!(f, "has local changes: {}", has_local_changes)?;
+            }
+            VcsInformation::Git { revision, is_dirty } => {
+                writeln!(f, "git revision: {}", revision)?;
+                writeln!(f, "has local changes: {}", is_dirty)?;
             }
             VcsInformation::Unknown => {
                 writeln!(f, "vcs info: unknown")?;
