@@ -36,6 +36,7 @@ impl Drop for AbortOnDropHandle {
 #[derive(Clone, Copy, Debug)]
 enum RepoVcs {
     Hg,
+    Jujutsu,
     Git,
     Unknown,
 }
@@ -46,6 +47,11 @@ async fn create_revision_data() -> buck2_data::VersionControlRevision {
         Ok(repo_vcs) => match repo_vcs {
             RepoVcs::Hg => {
                 if let Err(e) = add_hg_data(&mut revision).await {
+                    revision.command_error = Some(e.to_string());
+                }
+            }
+            RepoVcs::Jujutsu => {
+                if let Err(e) = add_jj_data(&mut revision).await {
                     revision.command_error = Some(e.to_string());
                 }
             }
@@ -120,6 +126,49 @@ async fn add_hg_data(revision: &mut buck2_data::VersionControlRevision) -> buck2
     Ok(())
 }
 
+async fn add_jj_data(revision: &mut buck2_data::VersionControlRevision) -> buck2_error::Result<()> {
+    let show_command = match reap_on_drop_command("jj", &[
+        "show",
+        "--no-pager",
+        "--color=never",
+        "-T",
+        "change_id ++ \" \" ++ commit_id",
+    ]) {
+        Ok(cmd) => cmd,
+        Err(e) => {
+            revision.command_error = Some(format!("Failed to create jj show command: {:?}", e));
+            return Ok(());
+        }
+    };
+    match show_command.output().await {
+        Ok(result) => {
+            if !result.status.success() {
+                revision.command_error = Some(format!(
+                    "Command `jj show` failed with error code {}; stderr:\n{}",
+                    result.status,
+                    std::str::from_utf8(&result.stderr)?
+                ));
+                return Ok(());
+            }
+            let stdout = std::str::from_utf8(&result.stdout)?.trim();
+            match stdout.split_once(' ') {
+                Some((change_id, commit_id)) => {
+                    revision.jj_change_id = Some(change_id.to_owned());
+                    revision.jj_commit_id = Some(commit_id.to_owned());
+                }
+                None => {
+                    revision.command_error =
+                        Some(format!("Unexpected jj show output format: {}", stdout));
+                }
+            }
+        }
+        Err(e) => {
+            revision.command_error = Some(format!("Command `jj show` failed with error: {:?}", e));
+        }
+    }
+    Ok(())
+}
+
 async fn add_git_data(
     revision: &mut buck2_data::VersionControlRevision,
 ) -> buck2_error::Result<()> {
@@ -181,10 +230,23 @@ async fn repo_type() -> buck2_error::Result<&'static RepoVcs> {
     static REPO_TYPE: OnceCell<buck2_error::Result<RepoVcs>> = OnceCell::const_new();
 
     async fn repo_type_impl() -> buck2_error::Result<RepoVcs> {
-        // Create futures for both VCS checks, wrapping the command creation in Result
+        // Create futures for VCS checks, wrapping the command creation in Result
         let hg_future = async {
             if let Ok(hg_command) = reap_on_drop_command("hg", &["root"]) {
                 if let Ok(output) = hg_command.output().await {
+                    if let Ok(stdout) = std::str::from_utf8(&output.stdout) {
+                        if !stdout.trim().is_empty() {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        };
+
+        let jj_future = async {
+            if let Ok(jj_command) = reap_on_drop_command("jj", &["root"]) {
+                if let Ok(output) = jj_command.output().await {
                     if let Ok(stdout) = std::str::from_utf8(&output.stdout) {
                         if !stdout.trim().is_empty() {
                             return true;
@@ -210,17 +272,22 @@ async fn repo_type() -> buck2_error::Result<&'static RepoVcs> {
             false
         };
 
-        // Run both checks in parallel
-        let (is_hg, is_git) = tokio::join!(hg_future, git_future);
+        // Run hg and jj checks concurrently
+        let (is_hg, is_jj) = tokio::join!(hg_future, jj_future);
+        if is_hg {
+            return Ok(RepoVcs::Hg);
+        }
+        if is_jj {
+            return Ok(RepoVcs::Jujutsu);
+        }
 
-        // Return the first matching VCS type
-        Ok(if is_hg {
-            RepoVcs::Hg
-        } else if is_git {
-            RepoVcs::Git
-        } else {
-            RepoVcs::Unknown
-        })
+        // Only check git if neither hg nor jj was found
+        let is_git = git_future.await;
+        if is_git {
+            return Ok(RepoVcs::Git);
+        }
+
+        Ok(RepoVcs::Unknown)
     }
 
     REPO_TYPE
