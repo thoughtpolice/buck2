@@ -57,6 +57,10 @@ enum VcsInformation {
         revision: String,
         has_local_changes: bool,
     },
+    Jujutsu {
+        change_id: String,
+        commit_id: String,
+    },
     Git {
         revision: String,
         is_dirty: bool,
@@ -133,6 +137,13 @@ impl Stats {
                             self.vcs_info = VcsInformation::Hg {
                                 revision: revision.clone(),
                                 has_local_changes,
+                            };
+                        } else if let (Some(change_id), Some(commit_id)) =
+                            (vcs.jj_change_id.as_ref(), vcs.jj_commit_id.as_ref())
+                        {
+                            self.vcs_info = VcsInformation::Jujutsu {
+                                change_id: change_id.clone(),
+                                commit_id: commit_id.clone(),
                             };
                         } else if let (Some(revision), Some(is_dirty)) =
                             (vcs.git_revision.as_ref(), vcs.git_is_dirty)
@@ -249,6 +260,13 @@ impl Display for Stats {
             } => {
                 writeln!(f, "hg revision: {}", revision)?;
                 writeln!(f, "has local changes: {}", has_local_changes)?;
+            }
+            VcsInformation::Jujutsu {
+                change_id,
+                commit_id,
+            } => {
+                writeln!(f, "jj @ change id: {}", change_id)?;
+                writeln!(f, "jj @ commit id: {}", commit_id)?;
             }
             VcsInformation::Git { revision, is_dirty } => {
                 writeln!(f, "git revision: {}", revision)?;
