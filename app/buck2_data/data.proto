@@ -605,6 +605,9 @@ message VersionControlRevision {
   optional string git_revision = 4;
   optional string git_branch = 5;
   optional bool git_is_dirty = 6;
+
+  optional string jj_change_id = 7;
+  optional string jj_commit_id = 8;
 }
 
 // Event sent during build commands
