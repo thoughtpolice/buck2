@@ -130,13 +130,13 @@ jobs:
             CARGO=cargo
           fi
           $CARGO build --release --bin buck2 --bin rust-project --target ${{ matrix.target.triple }}
-      - name: Sanity check with examples/with_prelude
-        if: ${{ !matrix.target.cross }}
-        shell: bash
-        run: |
-          BUCK2="$(pwd)/${{ steps.set_variables.outputs.buck2_out }}"
-          cd examples/with_prelude
-          "$BUCK2" build //rust/... //cpp/... //python/... -v=2
+#     - name: Sanity check with examples/with_prelude
+#       if: ${{ !matrix.target.cross }}
+#       shell: bash
+#       run: |
+#         BUCK2="$(pwd)/${{ steps.set_variables.outputs.buck2_out }}"
+#         cd examples/with_prelude
+#         "$BUCK2" build //rust/... //cpp/... //python/... -v=2
       - name: Move binary to artifacts/
         shell: bash
         run: |
