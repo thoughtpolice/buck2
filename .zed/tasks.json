@@ -1,0 +1,10 @@
+[
+  {
+    "label": "buck2 build //:buck2",
+    "command": "buck2",
+    "args": ["build", "//:buck2"],
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  }
+]
