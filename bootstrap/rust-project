@@ -4,86 +4,50 @@
   "name": "rust-project",
   "platforms": {
     "macos-aarch64": {
-      "size": 988446,
-      "hash": "blake3",
-      "digest": "41a83aaf9ba9c8fb4dc5485897d49b4f919ec2c6a58597c52c7be6255fb5f00c",
+      "size": 985912,
+      "hash": "sha256",
+      "digest": "a7b6780d0eaaf316e7ed1b2fd6efb8555ee813ff8d45549d6be935fb8f3d7579",
       "format": "zst",
       "path": "rust-project-aarch64-apple-darwin",
       "providers": [
         {
-          "url": "https://github.com/facebook/buck2/releases/download/2025-11-01/rust-project-aarch64-apple-darwin.zst"
-        }
-      ]
-    },
-    "windows-aarch64": {
-      "size": 845725,
-      "hash": "blake3",
-      "digest": "db63d6ef2794e08726c0df7c83854f7da4258c0cce1d235add2041ad3a5f023d",
-      "format": "zst",
-      "path": "rust-project-aarch64-pc-windows-msvc.exe",
-      "providers": [
-        {
-          "url": "https://github.com/facebook/buck2/releases/download/2025-11-01/rust-project-aarch64-pc-windows-msvc.exe.zst"
+          "url": "https://github.com/thoughtpolice/buck2/releases/download/snapshot-20251011-195437/rust-project-aarch64-apple-darwin.zst"
         }
       ]
     },
     "linux-aarch64": {
-      "size": 1108491,
-      "hash": "blake3",
-      "digest": "13430dc37e23f860f904611f1d657d6339cc332debabf1558612ff5546f33bb2",
+      "size": 1106051,
+      "hash": "sha256",
+      "digest": "8a3a693f304a8a3768ab1a1280153dbe11201932272846cae7a932a28f860bde",
       "format": "zst",
       "path": "rust-project-aarch64-unknown-linux-musl",
       "providers": [
         {
-          "url": "https://github.com/facebook/buck2/releases/download/2025-11-01/rust-project-aarch64-unknown-linux-musl.zst"
-        }
-      ]
-    },
-    "linux-riscv64": {
-      "size": 1128369,
-      "hash": "blake3",
-      "digest": "8d6632c683fdbf1813692743049d33c804073433e97ef22c0afc47b39cd4a55b",
-      "format": "zst",
-      "path": "rust-project-riscv64gc-unknown-linux-gnu",
-      "providers": [
-        {
-          "url": "https://github.com/facebook/buck2/releases/download/2025-11-01/rust-project-riscv64gc-unknown-linux-gnu.zst"
-        }
-      ]
-    },
-    "macos-x86_64": {
-      "size": 1059637,
-      "hash": "blake3",
-      "digest": "feabd5739b72d0a5e95cc910f92897305d025c35b2f3c5c9d5c4ef06a21539d9",
-      "format": "zst",
-      "path": "rust-project-x86_64-apple-darwin",
-      "providers": [
-        {
-          "url": "https://github.com/facebook/buck2/releases/download/2025-11-01/rust-project-x86_64-apple-darwin.zst"
+          "url": "https://github.com/thoughtpolice/buck2/releases/download/snapshot-20251011-195437/rust-project-aarch64-unknown-linux-musl.zst"
         }
       ]
     },
     "windows-x86_64": {
-      "size": 885193,
-      "hash": "blake3",
-      "digest": "cb817a59273c1fdccb3dac40bdcb818c8f7e3f3679323a57cfaac1a1bbab09d9",
+      "size": 883097,
+      "hash": "sha256",
+      "digest": "5cd288b599494b9cd96d544a31e0de5e2beeb4be05e42e8fdf5a974cffa443c5",
       "format": "zst",
       "path": "rust-project-x86_64-pc-windows-msvc.exe",
       "providers": [
         {
-          "url": "https://github.com/facebook/buck2/releases/download/2025-11-01/rust-project-x86_64-pc-windows-msvc.exe.zst"
+          "url": "https://github.com/thoughtpolice/buck2/releases/download/snapshot-20251011-195437/rust-project-x86_64-pc-windows-msvc.exe.zst"
         }
       ]
     },
     "linux-x86_64": {
-      "size": 1174629,
-      "hash": "blake3",
-      "digest": "5c8327dbc76dadb5a991e225825db9c301fb71fe43098b1dc5c4cdd0cc326205",
+      "size": 1174296,
+      "hash": "sha256",
+      "digest": "a4fce22024a0b7d365201785240cbc42e49365f5e845980c325d4c80b6b83fc8",
       "format": "zst",
       "path": "rust-project-x86_64-unknown-linux-musl",
       "providers": [
         {
-          "url": "https://github.com/facebook/buck2/releases/download/2025-11-01/rust-project-x86_64-unknown-linux-musl.zst"
+          "url": "https://github.com/thoughtpolice/buck2/releases/download/snapshot-20251011-195437/rust-project-x86_64-unknown-linux-musl.zst"
         }
       ]
     }
