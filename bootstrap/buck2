@@ -4,62 +4,62 @@
   "name": "buck2",
   "platforms": {
     "macos-aarch64": {
-      "size": 29351270,
+      "size": 29266219,
       "hash": "blake3",
-      "digest": "1eecee4697ee80e05f3d766d00d9da0a57b85c88f9d06f44819aeef488c2f504",
+      "digest": "9fded8410a558ed8f4818d1d48d9f9b32cbd5580ea7c8d6d9e47bb59efdd8025",
       "format": "zst",
       "path": "buck2-aarch64-apple-darwin",
       "providers": [
         {
-          "url": "https://github.com/facebook/buck2/releases/download/2025-06-01/buck2-aarch64-apple-darwin.zst"
+          "url": "https://github.com/thoughtpolice/buck2/releases/download/snapshot-20250531-201031/buck2-aarch64-apple-darwin.zst"
         }
       ]
     },
     "linux-aarch64": {
-      "size": 30401083,
+      "size": 30184299,
       "hash": "blake3",
-      "digest": "56b08d4a935fd1e0e709a87c7ef2d39e631a74638ea51214a2909016f2bd4b5d",
+      "digest": "4d84a1fbbb67e2c199be62448c6a2ca1f1de950ebd4823add0ab10f7e169fbf6",
       "format": "zst",
       "path": "buck2-aarch64-unknown-linux-musl",
       "providers": [
         {
-          "url": "https://github.com/facebook/buck2/releases/download/2025-06-01/buck2-aarch64-unknown-linux-musl.zst"
+          "url": "https://github.com/thoughtpolice/buck2/releases/download/snapshot-20250531-201031/buck2-aarch64-unknown-linux-musl.zst"
         }
       ]
     },
     "macos-x86_64": {
-      "size": 30912953,
+      "size": 30780293,
       "hash": "blake3",
-      "digest": "bc839b6d766635694ed4febd552d9bd17bbbb7a7c019c16765fcb54ac1a1e912",
+      "digest": "33f930987a8bf40fd6119340a5e345fd2ca0c5ceb201155c4a5b988e0d81b792",
       "format": "zst",
       "path": "buck2-x86_64-apple-darwin",
       "providers": [
         {
-          "url": "https://github.com/facebook/buck2/releases/download/2025-06-01/buck2-x86_64-apple-darwin.zst"
+          "url": "https://github.com/thoughtpolice/buck2/releases/download/snapshot-20250531-201031/buck2-x86_64-apple-darwin.zst"
         }
       ]
     },
     "windows-x86_64": {
-      "size": 26119750,
+      "size": 26132740,
       "hash": "blake3",
-      "digest": "9069b88169fe56f1490ccaa60b1647db428859046db4b7c2b52743c0b06e9fac",
+      "digest": "f012bc08720d507a95a8069abfaaa966e7bc9616343b6d305e260f95c722c0e5",
       "format": "zst",
       "path": "buck2-x86_64-pc-windows-msvc.exe",
       "providers": [
         {
-          "url": "https://github.com/facebook/buck2/releases/download/2025-06-01/buck2-x86_64-pc-windows-msvc.exe.zst"
+          "url": "https://github.com/thoughtpolice/buck2/releases/download/snapshot-20250531-201031/buck2-x86_64-pc-windows-msvc.exe.zst"
         }
       ]
     },
     "linux-x86_64": {
-      "size": 31652275,
+      "size": 31534336,
       "hash": "blake3",
-      "digest": "6925fbb87be96414f1bd6b3397e9035dadf67fa496e9baa2ac91e55f79ac6793",
+      "digest": "722cd83f808ae987152c19a3ab97d89467b34c0795c89864d4daba17e42fc24d",
       "format": "zst",
       "path": "buck2-x86_64-unknown-linux-musl",
       "providers": [
         {
-          "url": "https://github.com/facebook/buck2/releases/download/2025-06-01/buck2-x86_64-unknown-linux-musl.zst"
+          "url": "https://github.com/thoughtpolice/buck2/releases/download/snapshot-20250531-201031/buck2-x86_64-unknown-linux-musl.zst"
         }
       ]
     }
