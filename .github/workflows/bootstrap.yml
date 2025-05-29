@@ -1,0 +1,55 @@
+name: Bootstrap Buck2
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions: read-all
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            abi: x86_64-unknown-linux-gnu
+          - os: windows-2022
+            abi: x86_64-pc-windows-msvc
+          - os: macos-14
+            abi: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+
+    name: binaries
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install DotSlash
+        uses: ./.github/actions/install-dotslash
+      - name: Set up environment
+        shell: bash
+        run: echo "PATH=$GITHUB_WORKSPACE/bootstrap:$PATH" >> $GITHUB_ENV
+      - name: Buckify dependencies
+        shell: bash
+        run: reindeer --third-party-dir shim/third-party/rust buckify
+      - name: buck2 build ...
+        shell: bash
+        run: |
+          buck2 build //:buck2 --out buck-out/buck2.exe
+          buck2 clean && rm -rf buck-out/v2
+      #- name: Upload build logs
+      #  if: always()
+      #  shell: bash
+      #  run: buck2 run //src/tools/buck2-logs:upload -- --host https://buck2-logs.deno.dev
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: buck2-${{ matrix.abi }}
+          path: buck-out
+          retention-days: 14
