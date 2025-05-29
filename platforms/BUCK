@@ -1,0 +1,3 @@
+load(":remote.bzl", "native_remote_execution_platforms")
+
+native_remote_execution_platforms(name = "platforms") 
