@@ -31,13 +31,10 @@
 
     in {
       devShells.default = pkgs.mkShell {
-        buildInputs = pkgs.lib.optionals pkgs.stdenv.isDarwin (with pkgs.darwin.apple_sdk.frameworks; [
-          CoreFoundation
-          CoreServices
-          IOKit
-          Security
+        buildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux ([
+          pkgs.mold-wrapped
         ]);
-        packages = [ my-rust-bin pkgs.dotslash pkgs.python3 pkgs.mold-wrapped pkgs.lld_20 pkgs.clang_20 ];
+        packages = [ my-rust-bin pkgs.dotslash pkgs.python3 pkgs.lld_20 pkgs.clang_20 ];
         shellHook =
           ''
             export BUCK2_BUILD_PROTOC=${pkgs.protobuf}/bin/protoc
