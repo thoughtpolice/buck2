@@ -468,7 +468,6 @@ async fn test(
             request.included_labels.clone(),
             request.excluded_labels.clone(),
             request.always_exclude,
-            request.build_filtered_targets,
         )),
         &*launcher,
         session,
@@ -1208,7 +1207,7 @@ impl<'a, 'e> TestDriver<'a, 'e> {
 
 async fn build_target_result(
     ctx: &LinearRecomputeDiceComputations<'_>,
-    label_filtering: &TestLabelFiltering,
+    _label_filtering: &TestLabelFiltering,
     label: ConfiguredProvidersLabel,
 ) -> anyhow::Result<(BuildTargetResult, FrozenProviderCollectionValue)> {
     // NOTE: We fail if we hit an incompatible target here. This can happen if we reach an
@@ -1219,43 +1218,32 @@ async fn build_target_result(
         .get_providers(&label)
         .await?
         .require_compatible()?;
-    let collections = providers.provider_collection();
 
-    let build_target_result = match <dyn TestProvider>::from_collection(collections) {
-        Some(test_info) => {
-            if skip_build_based_on_labels(test_info, label_filtering) {
-                return Ok((BuildTargetResult::new(), providers));
-            }
-            let materialization_and_upload = MaterializationAndUploadContext::skip();
-            let (result_builder, consumer) = AsyncBuildTargetResultBuilder::new();
-            result_builder
-                .wait_for(
-                    false,
-                    build_configured_label(
-                        &consumer,
-                        &ctx,
-                        &materialization_and_upload,
-                        label,
-                        &ProvidersToBuild {
-                            default: false,
-                            default_other: false,
-                            run: false,
-                            tests: true,
-                        },
-                        BuildConfiguredLabelOptions {
-                            skippable: false,
-                            graph_properties: Default::default(),
-                        },
-                        None, // TODO: is this right?
-                    ),
-                )
-                .await?
-        }
-        None => {
-            // not a test
-            BuildTargetResult::new()
-        }
-    };
+    // Always build all providers for all targets - this makes `buck2 test` a superset of `buck2 build`
+    let materialization_and_upload = MaterializationAndUploadContext::skip();
+    let (result_builder, consumer) = AsyncBuildTargetResultBuilder::new();
+    let build_target_result = result_builder
+        .wait_for(
+            false,
+            build_configured_label(
+                &consumer,
+                &ctx,
+                &materialization_and_upload,
+                label,
+                &ProvidersToBuild {
+                    default: true,
+                    default_other: true,
+                    run: false,
+                    tests: true,
+                },
+                BuildConfiguredLabelOptions {
+                    skippable: false,
+                    graph_properties: Default::default(),
+                },
+                None, // TODO: is this right?
+            ),
+        )
+        .await?;
     Ok((build_target_result, providers))
 }
 
@@ -1318,13 +1306,6 @@ fn skip_run_based_on_labels(
     label_filtering.is_excluded(target_labels)
 }
 
-fn skip_build_based_on_labels(
-    provider: &dyn TestProvider,
-    label_filtering: &TestLabelFiltering,
-) -> bool {
-    !label_filtering.build_filtered_targets && skip_run_based_on_labels(provider, label_filtering)
-}
-
 fn run_tests<'a, 'b>(
     test_executor: Arc<dyn TestExecutor + 'a>,
     providers_label: ConfiguredProvidersLabel,
@@ -1365,8 +1346,6 @@ struct TestLabelFiltering {
     /// If true, ignores order of precedence such that as long as an exclusion filter matches, we
     /// don't match the set of labels.
     always_exclude: bool,
-    /// Whether to build targets that are filtered out, but don't run it.
-    build_filtered_targets: bool,
 }
 
 impl TestLabelFiltering {
@@ -1402,13 +1381,11 @@ impl TestLabelFiltering {
         included_labels: Vec<String>,
         excluded_labels: Vec<String>,
         always_exclude: bool,
-        build_filtered_targets: bool,
     ) -> Self {
         Self {
             included_labels: included_labels.into_iter().collect(),
             excluded_labels: excluded_labels.into_iter().collect(),
             always_exclude,
-            build_filtered_targets,
         }
     }
 }
