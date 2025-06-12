@@ -4,22 +4,27 @@
       "buck2": {
         "platforms": {
           "macos-aarch64": {
+            "hash": "sha256",
             "regex": "^buck2-aarch64-apple-darwin.zst$",
             "path": "buck2-aarch64-apple-darwin"
           },
           "linux-aarch64": {
+            "hash": "sha256",
             "regex": "^buck2-aarch64-unknown-linux-musl.zst$",
             "path": "buck2-aarch64-unknown-linux-musl"
           },
           "macos-x86_64": {
+            "hash": "sha256",
             "regex": "^buck2-x86_64-apple-darwin.zst$",
             "path": "buck2-x86_64-apple-darwin"
           },
           "windows-x86_64": {
+            "hash": "sha256",
             "regex": "^buck2-x86_64-pc-windows-msvc.exe.zst$",
             "path": "buck2-x86_64-pc-windows-msvc.exe"
           },
           "linux-x86_64": {
+            "hash": "sha256",
             "regex": "^buck2-x86_64-unknown-linux-musl.zst$",
             "path": "buck2-x86_64-unknown-linux-musl"
           }
@@ -28,22 +33,27 @@
       "rust-project": {
         "platforms": {
           "macos-aarch64": {
+            "hash": "sha256",
             "regex": "^rust-project-aarch64-apple-darwin.zst$",
             "path": "rust-project-aarch64-apple-darwin"
           },
           "linux-aarch64": {
+            "hash": "sha256",
             "regex": "^rust-project-aarch64-unknown-linux-musl.zst$",
             "path": "rust-project-aarch64-unknown-linux-musl"
           },
           "macos-x86_64": {
+            "hash": "sha256",
             "regex": "^rust-project-x86_64-apple-darwin.zst$",
             "path": "rust-project-x86_64-apple-darwin"
           },
           "windows-x86_64": {
+            "hash": "sha256",
             "regex": "^rust-project-x86_64-pc-windows-msvc.exe.zst$",
             "path": "rust-project-x86_64-pc-windows-msvc.exe"
           },
           "linux-x86_64": {
+            "hash": "sha256",
             "regex": "^rust-project-x86_64-unknown-linux-musl.zst$",
             "path": "rust-project-x86_64-unknown-linux-musl"
           }
