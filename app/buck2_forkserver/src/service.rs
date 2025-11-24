@@ -208,7 +208,6 @@ impl UnixForkserverService {
         // Some actions clear env and don't pass XDG_RUNTIME_DIR
         // This env var is required for systemd-run,
         // without passing it systemd returns "Failed to connect to bus: No medium found"
-        #[cfg(fbcode_build)]
         if let Ok(value) = std::env::var("XDG_RUNTIME_DIR") {
             cmd.env("XDG_RUNTIME_DIR", value);
         }
