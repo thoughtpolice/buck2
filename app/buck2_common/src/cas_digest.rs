@@ -182,6 +182,15 @@ impl DigestAlgorithm {
             Self::Blake3Keyed { .. } => DigestAlgorithmFamily::Blake3Keyed,
         }
     }
+
+    /// Convert to the REAPI proto `DigestFunction.Value` as `i32`.
+    pub fn to_re_digest_function(self) -> i32 {
+        match self {
+            Self::Sha1 => 2,
+            Self::Sha256 => 1,
+            Self::Blake3 | Self::Blake3Keyed { .. } => 9,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Dupe, Debug, Allocative, Hash, Eq, PartialEq)]

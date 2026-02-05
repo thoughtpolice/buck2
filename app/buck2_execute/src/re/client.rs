@@ -919,7 +919,11 @@ impl RemoteExecutionClientImpl {
                 with_error_handler(
                     op_name,
                     "<none>",
-                    REClientBuilder::build_and_connect(&static_metadata.0).await,
+                    REClientBuilder::build_and_connect(
+                        &static_metadata.0,
+                        re_config.digest_function,
+                    )
+                    .await,
                 )
                 .await?
             };
