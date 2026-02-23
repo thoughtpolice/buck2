@@ -133,6 +133,7 @@ impl ReDirectorySerializer {
                         name: name.as_str().into(),
                         digest: Some(f.digest.to_grpc()),
                         is_executable: f.is_executable,
+                        ..Default::default()
                     });
                 }
                 DirectoryEntry::Leaf(ActionDirectoryMember::Symlink(s)) => {
@@ -151,12 +152,14 @@ impl ReDirectorySerializer {
                     symlinks.push(RE::SymlinkNode {
                         name: name.as_str().into(),
                         target,
+                        ..Default::default()
                     });
                 }
                 DirectoryEntry::Leaf(ActionDirectoryMember::ExternalSymlink(s)) => {
                     symlinks.push(RE::SymlinkNode {
                         name: name.as_str().into(),
                         target: s.target_str().to_owned(),
+                        ..Default::default()
                     });
                 }
             }
@@ -182,6 +185,7 @@ impl ReDirectorySerializer {
             files,
             directories,
             symlinks,
+            ..Default::default()
         }
     }
 
