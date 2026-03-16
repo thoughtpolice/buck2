@@ -44,6 +44,15 @@ message CommandRequest {
   optional uint32 graceful_shutdown_timeout_s = 14;
   // The cgroup that the command should be spawned into. Must already exist.
   optional string command_cgroup = 17;
+  // Landlock filesystem access rules for sandboxing.
+  optional LandlockConfig landlock = 18;
+}
+
+message LandlockConfig {
+  // Paths the action is allowed to read.
+  repeated string read_paths = 1;
+  // Paths the action is allowed to read and write.
+  repeated string write_paths = 2;
 }
 
 message WorkingDirectory {

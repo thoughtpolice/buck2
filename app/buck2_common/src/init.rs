@@ -520,6 +520,7 @@ pub struct DaemonStartupConfig {
     pub health_check_config: HealthCheckConfig,
     pub retained_event_logs: usize,
     pub macos_qos_class: Option<String>,
+    pub test_builds_targets: bool,
 }
 
 impl DaemonStartupConfig {
@@ -626,6 +627,12 @@ impl DaemonStartupConfig {
                     from_config
                 }
             },
+            test_builds_targets: config
+                .parse(BuckconfigKeyRef {
+                    section: "buck2",
+                    property: "test_builds_targets",
+                })?
+                .unwrap_or(false),
         })
     }
 
@@ -656,6 +663,7 @@ impl DaemonStartupConfig {
             health_check_config: HealthCheckConfig::default(),
             retained_event_logs: DEFAULT_RETAINED_EVENT_LOGS,
             macos_qos_class: None,
+            test_builds_targets: false,
         }
     }
 }
