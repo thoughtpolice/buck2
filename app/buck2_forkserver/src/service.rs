@@ -76,6 +76,7 @@ struct ValidatedCommand {
     std_redirects: Option<StdRedirectPaths>,
     graceful_shutdown_timeout_s: Option<u32>,
     command_cgroup: Option<CgroupPathBuf>,
+    landlock: Option<buck2_forkserver_proto::LandlockConfig>,
 }
 
 impl ValidatedCommand {
@@ -90,6 +91,7 @@ impl ValidatedCommand {
             std_redirects,
             graceful_shutdown_timeout_s,
             command_cgroup,
+            landlock,
         } = cmd_request;
 
         let exe = OsStr::from_bytes(&exe);
@@ -128,6 +130,7 @@ impl ValidatedCommand {
             std_redirects,
             graceful_shutdown_timeout_s,
             command_cgroup,
+            landlock,
         })
     }
 }
@@ -210,6 +213,19 @@ impl UnixForkserverService {
         cmd.args(validated_cmd.argv.iter().map(|a| OsStr::from_bytes(a)));
 
         Self::configure_environment(&mut cmd, &validated_cmd.env)?;
+
+        // Apply Landlock rules if configured.
+        #[cfg(target_os = "linux")]
+        if let Some(landlock_config) = &validated_cmd.landlock {
+            let read_paths: Vec<PathBuf> =
+                landlock_config.read_paths.iter().map(PathBuf::from).collect();
+            let write_paths: Vec<PathBuf> =
+                landlock_config.write_paths.iter().map(PathBuf::from).collect();
+            let rules =
+                buck2_sandbox::landlock::LandlockRules::prepare(&read_paths, &write_paths)
+                    .buck_error_context("Failed to prepare Landlock rules")?;
+            buck2_sandbox::landlock::setup_landlock_pre_exec(&mut cmd, rules);
+        }
 
         // cmd: ready-to-spawn process command
         // miniperf_output: path to miniperf output file (if monitoring)
