@@ -26,7 +26,10 @@ use buck2_common::liveliness_observer::LivelinessObserverExt;
 use buck2_common::liveliness_observer::NoopLivelinessObserver;
 use buck2_common::local_resource_state::LocalResourceHolder;
 use buck2_core::content_hash::ContentBasedPathHash;
+use buck2_core::execution_types::executor_config::LocalSandboxMode;
 use buck2_core::fs::artifact_path_resolver::ArtifactFs;
+#[cfg(unix)]
+use buck2_sandbox::symlink_farm::SymlinkFarm;
 use buck2_core::fs::buck_out_path::BuildArtifactPath;
 use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
@@ -145,6 +148,7 @@ pub struct LocalExecutor {
     worker_pool: Option<Arc<WorkerPool>>,
     memory_tracker: Option<MemoryTrackerHandle>,
     daemon_id: DaemonId,
+    sandbox_mode: LocalSandboxMode,
 }
 
 impl LocalExecutor {
@@ -160,6 +164,7 @@ impl LocalExecutor {
         worker_pool: Option<Arc<WorkerPool>>,
         memory_tracker: Option<MemoryTrackerHandle>,
         daemon_id: DaemonId,
+        sandbox_mode: LocalSandboxMode,
     ) -> Self {
         Self {
             artifact_fs,
@@ -173,6 +178,7 @@ impl LocalExecutor {
             worker_pool,
             memory_tracker,
             daemon_id,
+            sandbox_mode,
         }
     }
 
@@ -190,13 +196,30 @@ impl LocalExecutor {
         disable_miniperf: bool,
         cgroup: Option<CgroupPathBuf>,
         freeze_rx: impl ActionFreezeEventReceiver,
+        sandbox_root: Option<&'a std::path::Path>,
+        #[cfg(target_os = "linux")] landlock_paths: Option<&'a buck2_sandbox::landlock::LandlockPaths>,
     ) -> impl futures::future::Future<Output = buck2_error::Result<CommandResult>> + Send + 'a {
         async move {
-            let working_directory = self.root.join_cow(working_directory);
+            let effective_root = match sandbox_root {
+                Some(root) => std::borrow::Cow::Owned(AbsNormPathBuf::new(root.to_owned())
+                    .buck_error_context("Invalid sandbox root")?),
+                None => std::borrow::Cow::Borrowed(&self.root),
+            };
+            let working_directory = effective_root.join_cow(working_directory);
 
             let result = match &self.forkserver {
                 #[cfg(unix)]
                 ForkserverAccess::Client(forkserver) => {
+                    #[cfg(target_os = "linux")]
+                    let landlock_config = landlock_paths.map(|paths| {
+                        buck2_forkserver_proto::LandlockConfig {
+                            read_paths: paths.read_paths.clone(),
+                            write_paths: paths.write_paths.clone(),
+                        }
+                    });
+                    #[cfg(not(target_os = "linux"))]
+                    let landlock_config = None;
+
                     unix::exec_via_forkserver(
                         forkserver,
                         exe,
@@ -209,6 +232,7 @@ impl LocalExecutor {
                         self.knobs.enable_miniperf && !disable_miniperf,
                         cgroup,
                         freeze_rx,
+                        landlock_config,
                     )
                     .await
                 }
@@ -224,6 +248,24 @@ impl LocalExecutor {
                         env,
                         env_inheritance,
                     );
+
+                    // Apply Landlock rules directly for the non-forkserver path.
+                    #[cfg(target_os = "linux")]
+                    if let Some(paths) = landlock_paths {
+                        let read_paths: Vec<std::path::PathBuf> =
+                            paths.read_paths.iter().map(std::path::PathBuf::from).collect();
+                        let write_paths: Vec<std::path::PathBuf> =
+                            paths.write_paths.iter().map(std::path::PathBuf::from).collect();
+                        if let Ok(rules) = buck2_sandbox::landlock::LandlockRules::prepare(
+                            &read_paths,
+                            &write_paths,
+                        ) {
+                            buck2_sandbox::landlock::setup_landlock_pre_exec(
+                                &mut cmd,
+                                &std::sync::Arc::new(rules),
+                            );
+                        }
+                    }
 
                     let alive = liveliness_observer
                         .while_alive()
@@ -276,6 +318,8 @@ impl LocalExecutor {
         env: &[(&str, StrOrOsStr<'_>)],
         cgroup: Option<CgroupPathBuf>,
         freeze_rx: impl ActionFreezeEventReceiver,
+        sandbox_root: Option<&std::path::Path>,
+        #[cfg(target_os = "linux")] landlock_paths: Option<&buck2_sandbox::landlock::LandlockPaths>,
     ) -> Result<
         (
             TimeSpan,
@@ -368,6 +412,9 @@ impl LocalExecutor {
                         request.disable_miniperf(),
                         cgroup,
                         freeze_rx,
+                        sandbox_root,
+                        #[cfg(target_os = "linux")]
+                        landlock_paths,
                     )
                     .await
                 };
@@ -397,6 +444,8 @@ impl LocalExecutor {
         args: &[String],
         worker: Option<&WorkerHandle>,
         env: &[(&str, StrOrOsStr<'_>)],
+        sandbox_root: Option<&std::path::Path>,
+        #[cfg(target_os = "linux")] landlock_paths: Option<&buck2_sandbox::landlock::LandlockPaths>,
     ) -> Result<
         (
             TimeSpan,
@@ -485,6 +534,9 @@ impl LocalExecutor {
                     env,
                     cgroup_session.as_ref().map(|s| s.path.clone()),
                     freeze_rx,
+                    sandbox_root,
+                    #[cfg(target_os = "linux")]
+                    landlock_paths,
                 )
                 .await;
 
@@ -681,6 +733,91 @@ impl LocalExecutor {
             },
         };
 
+        // Build sandbox if mode is not Disabled and we're not using a worker
+        // (workers are long-lived processes incompatible with per-action sandboxing).
+        let effective_sandbox_mode = if worker.is_some() {
+            LocalSandboxMode::Disabled
+        } else {
+            buck2_sandbox::effective_sandbox_mode(self.sandbox_mode)
+        };
+
+        #[cfg(unix)]
+        let mut sandbox: Option<SymlinkFarm>;
+        #[cfg(not(unix))]
+        let sandbox: Option<()>;
+
+        #[cfg(unix)]
+        let mut output_paths: Vec<ProjectRelativePathBuf>;
+
+        #[allow(unused_assignments)]
+        {
+            sandbox = None;
+            #[cfg(unix)]
+            {
+                output_paths = Vec::new();
+            }
+        }
+
+        #[cfg(unix)]
+        if effective_sandbox_mode != LocalSandboxMode::Disabled {
+            let input_paths = collect_sandbox_input_paths(request, &self.artifact_fs);
+            output_paths = collect_sandbox_output_paths(request, &self.artifact_fs);
+
+            match SymlinkFarm::build(
+                self.root.as_path(),
+                &input_paths,
+                &output_paths,
+                scratch_path.0.as_ref(),
+                request.working_directory(),
+            )
+            .await
+            {
+                Ok(farm) => {
+                    sandbox = Some(farm);
+                }
+                Err(e) => {
+                    return manager.error("sandbox_setup_failed", e);
+                }
+            }
+        }
+
+        let sandbox_root_path = sandbox.as_ref().map(|s| {
+            #[cfg(unix)]
+            { s.root() }
+            #[cfg(not(unix))]
+            { unreachable!() }
+        });
+
+        // Build Landlock paths for kernel enforcement.
+        #[cfg(target_os = "linux")]
+        let landlock_paths_data;
+        #[cfg(target_os = "linux")]
+        let landlock_paths_ref: Option<&buck2_sandbox::landlock::LandlockPaths>;
+
+        #[cfg(target_os = "linux")]
+        if effective_sandbox_mode == LocalSandboxMode::Landlock {
+            if let Some(sandbox_ref) = &sandbox {
+                let sandbox_root_str = sandbox_ref.root().to_owned();
+                let mut read_paths: Vec<std::path::PathBuf> = vec![sandbox_root_str.clone()];
+                // Add the executable's directory to read+execute paths.
+                if let Some(exe_path) = args.first() {
+                    let exe_abs = std::path::Path::new(exe_path);
+                    if exe_abs.is_absolute() {
+                        if let Some(parent) = exe_abs.parent() {
+                            read_paths.push(parent.to_owned());
+                        }
+                    }
+                }
+                let write_paths: Vec<std::path::PathBuf> = vec![sandbox_root_str];
+                landlock_paths_data = buck2_sandbox::landlock::LandlockPaths::new(read_paths, write_paths);
+                landlock_paths_ref = Some(&landlock_paths_data);
+            } else {
+                landlock_paths_ref = None;
+            }
+        } else {
+            landlock_paths_ref = None;
+        }
+
         let (time_span, start_time, res, manager) = match self
             .exec_with_resource_control(
                 action_digest,
@@ -692,12 +829,26 @@ impl LocalExecutor {
                 args,
                 worker.as_deref(),
                 &env,
+                sandbox_root_path,
+                #[cfg(target_os = "linux")]
+                landlock_paths_ref,
             )
             .await
         {
             Ok(x) => x,
             Err(e) => return e,
         };
+
+        // Collect outputs from sandbox back to project root.
+        #[cfg(unix)]
+        if let Some(sandbox_ref) = &sandbox {
+            if let Err(e) = sandbox_ref
+                .collect_outputs(self.root.as_path(), &output_paths)
+                .await
+            {
+                return manager.error("sandbox_output_collection_failed", e);
+            }
+        }
 
         let CommandResult {
             status,
@@ -1649,6 +1800,61 @@ impl EnvironmentBuilder for Command {
     }
 }
 
+/// Collect input paths from a command execution request for sandbox construction.
+fn collect_sandbox_input_paths(
+    request: &CommandExecutionRequest,
+    artifact_fs: &ArtifactFs,
+) -> Vec<ProjectRelativePathBuf> {
+    let mut paths = Vec::new();
+
+    for input in request.inputs() {
+        match input {
+            CommandExecutionInput::Artifact(group) => {
+                for (artifact, _value) in group.iter() {
+                    if let Ok(path) = artifact.resolve_path(artifact_fs, None) {
+                        paths.push(path);
+                    }
+                }
+            }
+            CommandExecutionInput::ActionMetadata(blob) => {
+                if let Ok(path) = artifact_fs
+                    .buck_out_path_resolver()
+                    .resolve_gen(&blob.path, None)
+                {
+                    paths.push(path);
+                }
+            }
+            CommandExecutionInput::ScratchPath(_) => {
+                // Scratch is handled separately (created as empty dir).
+            }
+            CommandExecutionInput::IncrementalRemoteOutput(path, _entry) => {
+                paths.push(path.clone());
+            }
+        }
+    }
+
+    paths
+}
+
+/// Collect output paths from a command execution request for sandbox construction.
+fn collect_sandbox_output_paths(
+    request: &CommandExecutionRequest,
+    artifact_fs: &ArtifactFs,
+) -> Vec<ProjectRelativePathBuf> {
+    let mut paths = Vec::new();
+
+    for output in request.outputs() {
+        if let Ok(resolved) = output.resolve(
+            artifact_fs,
+            Some(&ContentBasedPathHash::for_output_artifact()),
+        ) {
+            paths.push(resolved.into_path());
+        }
+    }
+
+    paths
+}
+
 #[cfg(unix)]
 mod unix {
     use std::os::unix::ffi::OsStrExt;
@@ -1667,6 +1873,7 @@ mod unix {
         enable_miniperf: bool,
         cgroup_path: Option<CgroupPathBuf>,
         freeze_rx: impl ActionFreezeEventReceiver,
+        landlock_config: Option<buck2_forkserver_proto::LandlockConfig>,
     ) -> buck2_error::Result<CommandResult> {
         let exe = exe.as_ref();
 
@@ -1685,6 +1892,7 @@ mod unix {
             std_redirects: None,
             graceful_shutdown_timeout_s: None,
             command_cgroup: cgroup_path.map(|p| p.to_string()),
+            landlock: landlock_config,
         };
         apply_local_execution_environment(&mut req, working_directory, env, env_inheritance);
         forkserver
