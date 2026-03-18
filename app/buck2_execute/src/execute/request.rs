@@ -404,6 +404,9 @@ pub struct CommandExecutionRequest {
     /// Set for local resource setup commands whose backgrounded processes
     /// must survive after the setup script exits.
     skip_resource_control: bool,
+    /// Whether to disable local sandboxing for this specific action,
+    /// even when the executor has sandboxing enabled.
+    disable_local_sandbox: bool,
 }
 
 impl CommandExecutionRequest {
@@ -441,6 +444,7 @@ impl CommandExecutionRequest {
             run_action_key: None,
             is_test: false,
             skip_resource_control: false,
+            disable_local_sandbox: false,
         }
     }
 
@@ -729,6 +733,15 @@ impl CommandExecutionRequest {
 
     pub fn skip_resource_control(&self) -> bool {
         self.skip_resource_control
+    }
+
+    pub fn with_disable_local_sandbox(mut self, disable_local_sandbox: bool) -> Self {
+        self.disable_local_sandbox = disable_local_sandbox;
+        self
+    }
+
+    pub fn disable_local_sandbox(&self) -> bool {
+        self.disable_local_sandbox
     }
 }
 
