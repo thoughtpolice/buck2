@@ -50,7 +50,7 @@ use futures::channel::mpsc;
 use futures::channel::mpsc::UnboundedSender;
 use futures::pin_mut;
 use futures::select;
-use rand::Rng;
+use rand::RngExt;
 use tokio::runtime::Builder;
 
 use crate::daemon_lower_priority::daemon_lower_priority;
