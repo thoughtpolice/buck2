@@ -1,0 +1,24 @@
+[package]
+description = "Local action sandboxing for Buck2 (symlink farm + Landlock)"
+edition = "2024"
+license = { workspace = true }
+name = "buck2_sandbox"
+repository = { workspace = true }
+version = "0.1.0"
+
+[dependencies]
+buck2_core = { workspace = true }
+buck2_error = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+nix = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = { workspace = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fbcode_build)"] }
