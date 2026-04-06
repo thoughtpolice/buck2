@@ -475,6 +475,40 @@ impl LogUploadMethod {
     }
 }
 
+/// How `buck2 rage` publishes its report. Client-only, like [`LogUploadMethod`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RageUploadMethod {
+    /// Use Meta-internal pastry/manifold/scribe (fbcode only)
+    Internal,
+    /// Pipe rage output to an external command's stdin
+    Command(String),
+    /// Just print to stdout, no upload
+    None,
+}
+
+impl RageUploadMethod {
+    pub fn from_buckconfig(config: &LegacyBuckConfig) -> buck2_error::Result<Self> {
+        let rage_upload_cmd = config.get(BuckconfigKeyRef {
+            section: "buck2",
+            property: "rage_upload_cmd",
+        });
+        if let Some(cmd) = rage_upload_cmd {
+            if cmd.is_empty() {
+                Err(buck2_error::buck2_error!(
+                    buck2_error::ErrorTag::Input,
+                    "rage_upload_cmd is set but empty"
+                ))
+            } else {
+                Ok(RageUploadMethod::Command(cmd.to_owned()))
+            }
+        } else if cfg!(fbcode_build) && !buck2_core::is_open_source() {
+            Ok(RageUploadMethod::Internal)
+        } else {
+            Ok(RageUploadMethod::None)
+        }
+    }
+}
+
 /// Pagable DICE storage settings, present (`Some`) only when paging is enabled by
 /// the `hydration` Buck settings. `page_out_on_idle` also implies paging is
 /// enabled. When present, the daemon
@@ -603,9 +637,10 @@ impl DaemonStartupConfig {
             }
         };
 
-        // Not a startup option (see `LogUploadMethod`), but an empty command should still fail
+        // Not startup options (see `LogUploadMethod`), but an empty command should still fail
         // the command, and the streaming client has nowhere to report it.
         LogUploadMethod::from_buckconfig(config)?;
+        RageUploadMethod::from_buckconfig(config)?;
 
         let startup_options = DaemonStartupOptions {
             share_dice: config
