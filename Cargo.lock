@@ -1265,6 +1265,7 @@ dependencies = [
  "buck2_data",
  "buck2_error",
  "buck2_event_log",
+ "buck2_event_observer",
  "buck2_fs",
  "buck2_hash",
  "buck2_query_parser",
