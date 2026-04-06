@@ -56,6 +56,15 @@ message CommandRequest {
   // The command then adopts its orphaned descendants, which stay zombies until
   // it exits.
   optional bool kill_detached_descendants = 20;
+  // Landlock filesystem access rules for sandboxing.
+  optional LandlockConfig landlock = 21;
+}
+
+message LandlockConfig {
+  // Paths the action is allowed to read.
+  repeated string read_paths = 1;
+  // Paths the action is allowed to read and write.
+  repeated string write_paths = 2;
 }
 
 message WorkingDirectory {
