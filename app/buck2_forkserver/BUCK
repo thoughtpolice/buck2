@@ -31,6 +31,7 @@ rust_library(
         "//buck2/app/buck2_fs:buck2_fs",
         "//buck2/app/buck2_grpc:buck2_grpc",
         "//buck2/app/buck2_resource_control:buck2_resource_control",
+        "//buck2/app/buck2_sandbox:buck2_sandbox",
         "//buck2/app/buck2_util:buck2_util",
         "//buck2/gazebo/dupe:dupe",
     ] + select({
