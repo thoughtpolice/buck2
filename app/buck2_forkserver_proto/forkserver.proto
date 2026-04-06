@@ -46,6 +46,15 @@ message CommandRequest {
   optional string command_cgroup = 17;
   // Network access policy for the command.
   optional buck.data.NetworkAccess network_access = 18;
+  // Landlock filesystem access rules for sandboxing.
+  optional LandlockConfig landlock = 19;
+}
+
+message LandlockConfig {
+  // Paths the action is allowed to read.
+  repeated string read_paths = 1;
+  // Paths the action is allowed to read and write.
+  repeated string write_paths = 2;
 }
 
 message WorkingDirectory {
