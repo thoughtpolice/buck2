@@ -167,6 +167,10 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
     ///       running the action; otherwise the action executes normally (graceful fallback)
     ///     * Requires `buck2.use_network_action_output_cache=true` config to take effect
     ///     * Example use case: caching network downloads in containerized offline build environments
+    /// * `disable_local_sandbox`: disables local sandboxing for this specific action (default: `false`)
+    ///     * When `true`, this action will run without a sandbox even if the executor has sandboxing
+    ///       enabled. Useful for actions that need to read absolute paths outside the project,
+    ///       require network access, or have known hermiticity issues.
     /// * The `prefer_local`, `prefer_remote` and `local_only` options allow selecting where the
     /// action should run if the executor selected for this target is a hybrid executor.
     ///     * All those options disable concurrent execution: the action will run on the preferred
@@ -274,6 +278,7 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
             Either<ValueOf<'v, &'v WorkerRunInfo<'v>>, ValueOf<'v, &'v RunInfo<'v>>>,
         >,
         #[starlark(require = named, default = false)] unique_input_inodes: bool,
+        #[starlark(require = named, default = false)] disable_local_sandbox: bool,
         #[starlark(require = named, default = NoneOr::None)] error_handler: NoneOr<
             StarlarkCallable<'v>,
         >,
@@ -607,6 +612,7 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
             allow_offline_output_cache,
             force_full_hybrid_if_capable,
             unique_input_inodes,
+            disable_local_sandbox,
             remote_execution_dependencies: re_dependencies,
             re_gang_workers,
             remote_execution_custom_image: re_custom_image,
