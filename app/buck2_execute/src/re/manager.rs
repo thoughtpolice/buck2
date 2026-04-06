@@ -98,6 +98,8 @@ pub struct RemoteExecutionConfig {
     pub buck_out_path: AbsNormPathBuf,
     /// Whether Buck is running in paranoid mode.
     pub is_paranoid_mode: bool,
+    /// Proto `DigestFunction.Value` as `i32` (e.g. 1=SHA256, 9=BLAKE3).
+    pub digest_function: i32,
 }
 
 impl RemoteExecutionConfig {
@@ -203,6 +205,7 @@ impl ReConnectionManager {
         logs_dir_path: Option<AbsNormPathBuf>,
         buck_out_path: AbsNormPathBuf,
         is_paranoid_mode: bool,
+        digest_function: i32,
     ) -> Self {
         Self {
             data: RwLock::new(Weak::new()),
@@ -214,6 +217,7 @@ impl ReConnectionManager {
                 logs_dir_path,
                 buck_out_path,
                 is_paranoid_mode,
+                digest_function,
             },
         }
     }
