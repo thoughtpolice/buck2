@@ -448,6 +448,16 @@ pub enum LogUploadMethod {
     None,
 }
 
+#[derive(Allocative, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RageUploadMethod {
+    /// Use Meta-internal pastry/manifold/scribe (fbcode only)
+    Internal,
+    /// Pipe rage output to an external command's stdin
+    Command(String),
+    /// Just print to stdout, no upload
+    None,
+}
+
 /// Pagable DICE storage settings, present (`Some`) only when paging is enabled by
 /// the `hydration` Buck settings. `page_out_on_idle` also implies paging is
 /// enabled. When present, the daemon
@@ -524,6 +534,7 @@ pub struct DaemonStartupOptions {
     pub resource_control: ResourceControlConfig,
     pub log_download_method: LogDownloadMethod,
     pub log_upload_method: LogUploadMethod,
+    pub rage_upload_method: RageUploadMethod,
     pub macos_qos_class: Option<MacosQosClass>,
     pub daemon_idle_timeout_s: Option<u64>,
     /// Pagable DICE storage settings, or `None` when paging is disabled.
@@ -624,6 +635,25 @@ impl DaemonStartupConfig {
             )?,
             log_download_method,
             log_upload_method,
+            rage_upload_method: {
+                let rage_upload_cmd = config.get(BuckconfigKeyRef {
+                    section: "buck2",
+                    property: "rage_upload_cmd",
+                });
+                if let Some(cmd) = rage_upload_cmd {
+                    if cmd.is_empty() {
+                        return Err(buck2_error::buck2_error!(
+                            buck2_error::ErrorTag::Input,
+                            "rage_upload_cmd is set but empty"
+                        ));
+                    }
+                    RageUploadMethod::Command(cmd.to_owned())
+                } else if cfg!(fbcode_build) && !buck2_core::is_open_source() {
+                    RageUploadMethod::Internal
+                } else {
+                    RageUploadMethod::None
+                }
+            },
             macos_qos_class: {
                 if buck2_env!("BUCK2_DISABLE_MACOS_QOS", bool)? {
                     return Err(buck2_error::buck2_error!(
@@ -688,6 +718,11 @@ impl DaemonStartupConfig {
                 LogUploadMethod::Manifold
             } else {
                 LogUploadMethod::None
+            },
+            rage_upload_method: if cfg!(fbcode_build) {
+                RageUploadMethod::Internal
+            } else {
+                RageUploadMethod::None
             },
             macos_qos_class: None,
             daemon_idle_timeout_s: None,
