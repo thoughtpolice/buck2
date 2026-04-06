@@ -1,0 +1,150 @@
+name: Build HEAD binaries
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+jobs:
+  create-release:
+    name: Create snapshot release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Compute snapshot tag (YYYYMMDD-HHMMSS)
+        id: meta
+        shell: bash
+        run: echo "tag=snapshot-$(date -u +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
+      - name: Create release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          SHA: ${{ github.sha }}
+        run: |
+          printf '%s\n' \
+            "Automated snapshot build of \`buck2\` and \`rust-project\` at [\`${SHA:0:10}\`](https://github.com/${GH_REPO}/commit/${SHA})." \
+            "" \
+            "DotSlash files named \`buck2\` and \`rust-project\` are attached to this release. With [DotSlash](https://dotslash-cli.com) installed, they download, verify, and cache the right binary for your platform:" \
+            "" \
+            '```sh' \
+            "curl -fLo buck2 https://github.com/${GH_REPO}/releases/download/${TAG}/buck2" \
+            "chmod +x buck2" \
+            "./buck2 --version" \
+            '```' \
+            > "$RUNNER_TEMP/notes.md"
+
+          gh release create "$TAG" \
+            --target "$SHA" \
+            --title "$TAG" \
+            --prerelease \
+            --notes-file "$RUNNER_TEMP/notes.md"
+
+  build:
+    name: Build ${{ matrix.target.triple }}
+    needs: create-release
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - os: 'ubuntu-24.04-arm'
+            triple: 'aarch64-unknown-linux-gnu'
+          - os: 'ubuntu-24.04-arm'
+            triple: 'aarch64-unknown-linux-musl'
+          - os: 'ubuntu-24.04'
+            triple: 'x86_64-unknown-linux-gnu'
+          - os: 'ubuntu-24.04'
+            triple: 'x86_64-unknown-linux-musl'
+          - os: 'macos-15'
+            triple: 'aarch64-apple-darwin'
+          - os: 'windows-2022'
+            triple: 'x86_64-pc-windows-msvc'
+    runs-on: ${{ matrix.target.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install packages (Ubuntu)
+        if: startsWith(matrix.target.os, 'ubuntu')
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools musl-dev
+      - name: Install Rust toolchain
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target.triple }}
+        run: |
+          # rustup reads the pinned channel and components from `rust-toolchain`
+          rustup toolchain install
+          rustup target add "$TARGET"
+      - name: Set up build cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          prefix-key: buck2-upload
+          key: ${{ matrix.target.triple }}
+      - name: Build
+        shell: bash
+        env:
+          RUSTFLAGS: "--cfg tokio_unstable -C strip=debuginfo -C codegen-units=1"
+          TARGET: ${{ matrix.target.triple }}
+          REPO_UPDATED_AT: ${{ github.event.repository.updated_at }}
+          SHA: ${{ github.sha }}
+        run: |
+          # Specify the release version information
+          # From <https://github.com/facebook/buck2/pull/886>
+          export BUCK2_SET_EXPLICIT_VERSION="${REPO_UPDATED_AT%%T*}-g${SHA}-aseipp"
+          export BUCK2_RELEASE_TIMESTAMP="$REPO_UPDATED_AT"
+
+          # aarch64-linux builds need JEMALLOC_SYS_WITH_LG_PAGE=16
+          # this is for e.g. linux running on apple silicon with native 16k pages
+          if [[ "$TARGET" == aarch64-unknown-linux* ]]; then
+            export JEMALLOC_SYS_WITH_LG_PAGE=16
+          fi
+
+          cargo build --release --bin buck2 --bin rust-project --target "$TARGET"
+      - name: Upload binaries to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.create-release.outputs.tag }}
+          TARGET: ${{ matrix.target.triple }}
+        run: |
+          exe=""
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            exe=".exe"
+          fi
+          mkdir artifacts
+          zstd -z "target/$TARGET/release/buck2$exe" -o "artifacts/buck2-$TARGET$exe.zst"
+          zstd -z "target/$TARGET/release/rust-project$exe" -o "artifacts/rust-project-$TARGET$exe.zst"
+          gh release upload "$TAG" artifacts/* --clobber
+
+  dotslash:
+    name: Publish DotSlash files
+    needs: [create-release, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Generate and upload DotSlash files
+        uses: facebook/dotslash-publish-release@9c9ec027515c34db9282a09a25a9cab5880b2c52 # v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          config: .github/dotslash-config.json
+          tag: ${{ needs.create-release.outputs.tag }}
