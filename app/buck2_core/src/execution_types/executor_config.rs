@@ -36,13 +36,15 @@ pub enum LocalSandboxMode {
     /// Symlink farm + Landlock kernel enforcement. Falls back to Symlink
     /// if Landlock unavailable.
     Landlock,
+    /// Automatic: Landlock on Linux, Symlink elsewhere.
+    Native,
 }
 
 #[derive(Debug, buck2_error::Error)]
 #[buck2(input)]
 enum LocalSandboxModeError {
     #[error(
-        "Invalid local_sandbox_mode: `{0}`. Expected one of: \"disabled\", \"symlink\", \"landlock\""
+        "Invalid local_sandbox_mode: `{0}`. Expected one of: \"disabled\", \"symlink\", \"landlock\", \"native\""
     )]
     InvalidMode(String),
 }
@@ -55,6 +57,7 @@ impl FromStr for LocalSandboxMode {
             "disabled" => Ok(LocalSandboxMode::Disabled),
             "symlink" => Ok(LocalSandboxMode::Symlink),
             "landlock" => Ok(LocalSandboxMode::Landlock),
+            "native" => Ok(LocalSandboxMode::Native),
             _ => Err(LocalSandboxModeError::InvalidMode(s.to_owned()).into()),
         }
     }
