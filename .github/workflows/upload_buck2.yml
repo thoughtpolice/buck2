@@ -51,25 +51,25 @@ jobs:
       fail-fast: false
       matrix:
         target:
-          - os: 'ubuntu-26.04'
+          - os: 'ubuntu-24.04'
             triple: 'aarch64-unknown-linux-gnu'
             cross: true
-          - os: 'ubuntu-26.04'
+          - os: 'ubuntu-24.04'
             triple: 'aarch64-unknown-linux-musl'
             cross: true
-          - os: 'ubuntu-26.04'
+          - os: 'ubuntu-24.04'
             triple: 'x86_64-unknown-linux-gnu'
-          - os: 'ubuntu-26.04'
+          - os: 'ubuntu-24.04'
             triple: 'x86_64-unknown-linux-musl'
             cross: true
-          - os: 'ubuntu-26.04'
+          - os: 'ubuntu-22.04'
             triple: 'riscv64gc-unknown-linux-gnu'
             cross: true
           - os: 'macos-14'
             triple: 'aarch64-apple-darwin'
           - os: 'macos-13'
             triple: 'x86_64-apple-darwin'
-          - os: 'windows-2025'
+          - os: 'windows-2022'
             triple: 'x86_64-pc-windows-msvc'
             is_windows: true
           - os: 'windows-11-arm'
@@ -84,7 +84,7 @@ jobs:
       - uses: SebRollen/toml-action@v1.0.2
         id: read_rust_toolchain
         with:
-          file: 'rust-toolchain.toml'
+          file: 'rust-toolchain'
           field: 'toolchain.channel'
       - uses: dtolnay/rust-toolchain@v1
         with:
