@@ -37,18 +37,32 @@ use buck2_wrapper_common::invocation_id::TraceId;
 use dupe::Dupe;
 use superconsole::Stdin;
 
-// fbcode likes to set its own allocator in fbcode.default_allocator
-// So when we set our own allocator, buck build buck2 or buck2 build buck2 often breaks.
-// Making jemalloc the default only when we do a cargo build.
+// fbcode likes to set its own allocator in fbcode.default_allocator we use
+// jemalloc as the global allocator for macOS and Linux there. for windows, we
+// use mimalloc as it's superior to the system allocator (see below).
+// TODO: build jemalloc under cfg(buck_build), too
 #[global_allocator]
 #[cfg(all(
-    any(target_os = "linux", target_os = "macos"),
+    fbcode_build,
+    not(target_os = "windows"),
     not(buck_build),
     not(buck2_memfrag)
 ))]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+// for OSS builds, we use mimalloc as the global allocator on all platforms. (we
+// also use it for buck_builds, because jemalloc doesn't work yet.)
+//
+// it improves performance and memory usage across the board, and has less
+// sharp edges than mimalloc for open source distribution like page size
+// fiddling. it's still plenty fast and well maintained
+// - https://github.com/facebook/buck2/pull/693
+// - https://github.com/facebook/buck2/issues/91
 #[global_allocator]
-#[cfg(all(target_os = "windows", not(buck2_memfrag)))]
+#[cfg(all(
+    any(target_os = "windows", not(fbcode_build), buck_build),
+    not(buck2_memfrag)
+))]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 // Opt-in fragmentation profiler, enabled with `-c buck2_dev.memfrag=true`. It wraps
