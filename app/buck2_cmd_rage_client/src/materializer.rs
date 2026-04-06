@@ -30,7 +30,7 @@ use crate::rage::MaterializerRageUploadData;
 pub async fn upload_materializer_data(
     buckd: Shared<LocalBoxFuture<'_, buck2_error::Result<BootstrapBuckdClient>>>,
     client_context: &ClientContext,
-    manifold: &ManifoldClient,
+    manifold: Option<&ManifoldClient>,
     manifold_id: &String,
     materializer_data: MaterializerRageUploadData,
 ) -> buck2_error::Result<String> {
@@ -73,8 +73,12 @@ pub async fn upload_materializer_data(
         }
     }
 
-    let manifold_filename = format!("flat/{manifold_id}_materializer_{materializer_data}");
-    buf_to_manifold(manifold, &capture.buf, manifold_filename).await
+    if let Some(manifold) = manifold {
+        let manifold_filename = format!("flat/{manifold_id}_materializer_{materializer_data}");
+        buf_to_manifold(manifold, &capture.buf, manifold_filename).await
+    } else {
+        Ok(String::from_utf8_lossy(&capture.buf).to_string())
+    }
 }
 
 /// Receive StdoutBytes, just capture them.
