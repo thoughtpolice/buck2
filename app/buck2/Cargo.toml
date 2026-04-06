@@ -62,6 +62,7 @@ buck2_wrapper_common.workspace = true
 clap.workspace = true
 dupe.workspace = true
 fbinit.workspace = true
+mimalloc.workspace = true
 superconsole.workspace = true
 tokio.workspace = true
 tracing.workspace = true
