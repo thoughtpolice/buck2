@@ -27,7 +27,7 @@ use buck2_util::indent::indent;
 use buck2_util::process::async_background_command;
 use buck2_wrapper_common::invocation_id::TraceId;
 use dupe::Dupe;
-use rand::Rng;
+use rand::RngExt;
 
 use crate::client_ctx::ClientCommandContext;
 use crate::path_arg::PathArg;
