@@ -64,12 +64,14 @@ impl FromStr for LocalSandboxMode {
 #[derive(Debug, Eq, Hash, PartialEq, Clone, Dupe, Allocative, Pagable)]
 pub struct LocalExecutorOptions {
     pub use_persistent_workers: bool,
+    pub sandbox_mode: LocalSandboxMode,
 }
 
 impl Default for LocalExecutorOptions {
     fn default() -> Self {
         Self {
             use_persistent_workers: true,
+            sandbox_mode: LocalSandboxMode::Disabled,
         }
     }
 }
