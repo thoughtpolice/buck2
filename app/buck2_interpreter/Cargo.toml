@@ -40,3 +40,6 @@ dice_futures = { workspace = true }
 [dev-dependencies]
 buck2_hash = { workspace = true }
 tempfile = { workspace = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fbcode_build)"] }
