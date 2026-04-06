@@ -17,6 +17,7 @@ use buck2_agent_interactive::Decision;
 use buck2_common::argv::Argv;
 use buck2_common::argv::SanitizedArgv;
 use buck2_common::init::DEFAULT_RETAINED_EVENT_LOGS;
+use buck2_common::init::LogUploadMethod;
 use buck2_common::invocation_paths::DEFAULT_ISOLATION_DIR;
 use buck2_common::invocation_paths::InvocationPaths;
 use buck2_error::ErrorTag;
@@ -332,6 +333,11 @@ fn get_event_log_subscriber<T: StreamingCommand>(
     let user_event_log = cmd.user_event_log();
 
     let logdir = paths.log_dir();
+    let log_upload_method = ctx
+        .immediate_config
+        .daemon_startup_config()
+        .map(|c| c.startup_options.log_upload_method.clone())
+        .unwrap_or(LogUploadMethod::None);
     let log = EventLog::new(
         logdir,
         ctx.working_dir.clone(),
@@ -348,6 +354,7 @@ fn get_event_log_subscriber<T: StreamingCommand>(
             .daemon_startup_config()
             .map(|daemon_startup_config| daemon_startup_config.startup_options.retained_event_logs)
             .unwrap_or(DEFAULT_RETAINED_EVENT_LOGS),
+        log_upload_method,
     );
     Box::new(log)
 }
