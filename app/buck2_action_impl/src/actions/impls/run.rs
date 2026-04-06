@@ -249,6 +249,7 @@ pub(crate) struct UnregisteredRunAction {
     pub(crate) allow_offline_output_cache: bool,
     pub(crate) force_full_hybrid_if_capable: bool,
     pub(crate) unique_input_inodes: bool,
+    pub(crate) disable_local_sandbox: bool,
     pub(crate) remote_execution_dependencies: ThinBoxSlice<RemoteExecutorDependency>,
     pub(crate) re_gang_workers: ThinBoxSlice<ReGangWorker>,
     // Since this is usually None, use a Box to avoid using memory that is the size
@@ -1209,6 +1210,7 @@ impl RunAction {
             .with_local_environment_inheritance(EnvironmentInheritance::local_command_exclusions())
             .with_force_full_hybrid_if_capable(self.inner.force_full_hybrid_if_capable)
             .with_unique_input_inodes(self.inner.unique_input_inodes)
+            .with_disable_local_sandbox(self.inner.disable_local_sandbox)
             .with_remote_execution_dependencies(self.inner.remote_execution_dependencies.to_vec())
             .with_re_gang_workers(self.inner.re_gang_workers.to_vec())
             .with_remote_execution_custom_image(
