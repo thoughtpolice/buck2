@@ -413,6 +413,10 @@ pub struct CommandExecutionRequest {
     /// ignoring the inherited `network_access` policy; no effect on RE. Set by the test
     /// orchestrator's `disable_local_network_isolation`, which explains the rationale.
     disable_local_network_isolation: bool,
+
+    /// Whether to disable local sandboxing for this specific action,
+    /// even when the executor has sandboxing enabled.
+    disable_local_sandbox: bool,
 }
 
 impl CommandExecutionRequest {
@@ -452,6 +456,7 @@ impl CommandExecutionRequest {
             skip_resource_control: false,
             network_access: None,
             disable_local_network_isolation: false,
+            disable_local_sandbox: false,
         }
     }
 
@@ -758,6 +763,15 @@ impl CommandExecutionRequest {
 
     pub fn disable_local_network_isolation(&self) -> bool {
         self.disable_local_network_isolation
+    }
+
+    pub fn with_disable_local_sandbox(mut self, disable_local_sandbox: bool) -> Self {
+        self.disable_local_sandbox = disable_local_sandbox;
+        self
+    }
+
+    pub fn disable_local_sandbox(&self) -> bool {
+        self.disable_local_sandbox
     }
 }
 
