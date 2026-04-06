@@ -517,9 +517,7 @@ fn re_platform(x: &RE::Platform) -> remote_execution::TPlatform {
         properties: x.properties.map(|x| remote_execution::TProperty {
             name: x.name.clone(),
             value: x.value.clone(),
-            ..Default::default()
         }),
-        ..Default::default()
     }
 }
 
@@ -993,7 +991,11 @@ impl RemoteExecutionClientImpl {
                 with_error_handler(
                     op_name,
                     "<none>",
-                    REClientBuilder::build_and_connect(&static_metadata.0).await,
+                    REClientBuilder::build_and_connect(
+                        &static_metadata.0,
+                        re_config.digest_function,
+                    )
+                    .await,
                 )
                 .await?
             };

@@ -36,6 +36,8 @@ use buck2_client_ctx::subscribers::superconsole::test::span_from_build_failure_c
 use buck2_error::BuckErrorContext;
 use buck2_error::ExitCode;
 use buck2_error::internal_error;
+use buck2_event_observer::verbosity::Verbosity;
+use buck2_event_observer::verbosity::VerbosityItem;
 use buck2_fs::error::IoResultExt;
 use buck2_fs::fs_util;
 use buck2_fs::working_dir::AbsWorkingDir;
@@ -161,7 +163,6 @@ If include patterns are present, regardless of whether exclude patterns are pres
     build_default_info: bool,
 
     /// Do not build DefaultInfo provider (this is the default)
-    #[allow(unused)]
     #[clap(long, group = "default-info")]
     skip_default_info: bool,
 
@@ -170,9 +171,15 @@ If include patterns are present, regardless of whether exclude patterns are pres
     build_run_info: bool,
 
     /// Do not build RunInfo provider (this is the default)
-    #[allow(unused)]
     #[clap(long, group = "run-info")]
     skip_run_info: bool,
+
+    /// Show stdout/stderr output for passing tests.
+    ///
+    /// By default, passing tests only show a summary line. This flag
+    /// causes their full stdout/stderr to be displayed.
+    #[clap(long)]
+    print_passing_details: bool,
 
     /// This option does nothing. It is here to keep compatibility with Buck1 and ci
     #[clap(long = "deep", hide = true)]
@@ -326,6 +333,23 @@ impl StreamingCommand for TestCommand {
         events_ctx: &mut EventsCtx,
     ) -> ExitResult {
         let context = ctx.client_context(matches, &self)?;
+
+        let build_default_info = if self.skip_default_info {
+            false
+        } else if self.build_default_info {
+            true
+        } else {
+            ctx.test_builds_targets()?
+        };
+
+        let build_run_info = if self.skip_run_info {
+            false
+        } else if self.build_run_info {
+            true
+        } else {
+            ctx.test_builds_targets()?
+        };
+
         let response = buckd
             .with_flushing()
             .test(
@@ -349,8 +373,8 @@ impl StreamingCommand for TestCommand {
                     }),
                     timeout: self.timeout_options.overall_timeout()?,
                     ignore_tests_attribute: self.ignore_tests_attribute,
-                    build_default_info: self.build_default_info,
-                    build_run_info: self.build_run_info,
+                    build_default_info,
+                    build_run_info,
                 },
                 events_ctx,
                 ctx.console_interaction_stream(&self.common_opts.console_opts),
@@ -495,6 +519,13 @@ impl StreamingCommand for TestCommand {
             }
             _ => exit_result,
         }
+    }
+
+    fn adjust_verbosity(&self, mut verbosity: Verbosity) -> Verbosity {
+        if self.print_passing_details {
+            verbosity.add_item(VerbosityItem::TestPassingDetails);
+        }
+        verbosity
     }
 
     fn console_opts(&self) -> &CommonConsoleOptions {
