@@ -175,6 +175,26 @@ impl EventLogOptions {
                         .spawn()?,
                 )
             }
+            LogDownloadMethod::Command(cmd) => {
+                let out_path = temp_path
+                    .path()
+                    .as_os_str()
+                    .to_str()
+                    .ok_or_else(|| internal_error!("temp_path is not valid UTF-8"))?;
+                let expanded = cmd
+                    .replace("$TRACE_ID", &trace_id.to_string())
+                    .replace("$OUT", out_path);
+                crate::eprintln!("Spawning: sh -c {}", expanded)?;
+                (
+                    "Command",
+                    async_background_command("sh")
+                        .args(["-c", &expanded])
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::piped())
+                        .spawn()?,
+                )
+            }
             LogDownloadMethod::None => {
                 return Err(EventLogOptionsError::LogNotFoundLocally(trace_id.dupe()).into());
             }

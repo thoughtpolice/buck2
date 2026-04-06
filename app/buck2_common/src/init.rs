@@ -465,6 +465,7 @@ impl ResourceControlConfig {
 pub enum LogDownloadMethod {
     Manifold,
     Curl(String),
+    Command(String),
     None,
 }
 
@@ -546,11 +547,24 @@ impl DaemonStartupConfig {
             if use_manifold {
                 Ok(LogDownloadMethod::Manifold)
             } else {
+                let log_download_cmd = config.get(BuckconfigKeyRef {
+                    section: "buck2",
+                    property: "log_download_cmd",
+                });
                 let log_url = config.get(BuckconfigKeyRef {
                     section: "buck2",
                     property: "log_url",
                 });
-                if let Some(log_url) = log_url {
+                if let Some(cmd) = log_download_cmd {
+                    if cmd.is_empty() {
+                        Err(buck2_error::buck2_error!(
+                            buck2_error::ErrorTag::Input,
+                            "log_download_cmd is empty, but log_use_manifold is false"
+                        ))
+                    } else {
+                        Ok(LogDownloadMethod::Command(cmd.to_owned()))
+                    }
+                } else if let Some(log_url) = log_url {
                     if log_url.is_empty() {
                         Err(buck2_error::buck2_error!(
                             buck2_error::ErrorTag::Input,
