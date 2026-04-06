@@ -527,6 +527,7 @@ pub struct DaemonStartupConfig {
     pub retained_event_logs: usize,
     pub macos_qos_class: Option<String>,
     pub daemon_idle_timeout_s: Option<u64>,
+    pub test_builds_targets: bool,
 }
 
 impl DaemonStartupConfig {
@@ -638,6 +639,12 @@ impl DaemonStartupConfig {
                 section: "buck2",
                 property: "daemon_idle_timeout_s",
             })?,
+            test_builds_targets: config
+                .parse(BuckconfigKeyRef {
+                    section: "buck2",
+                    property: "test_builds_targets",
+                })?
+                .unwrap_or(false),
         })
     }
 
@@ -669,6 +676,7 @@ impl DaemonStartupConfig {
             retained_event_logs: DEFAULT_RETAINED_EVENT_LOGS,
             macos_qos_class: None,
             daemon_idle_timeout_s: None,
+            test_builds_targets: false,
         }
     }
 }
