@@ -476,6 +476,16 @@ pub enum LogUploadMethod {
     None,
 }
 
+#[derive(Allocative, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RageUploadMethod {
+    /// Use Meta-internal pastry/manifold/scribe (fbcode only)
+    Internal,
+    /// Pipe rage output to an external command's stdin
+    Command(String),
+    /// Just print to stdout, no upload
+    None,
+}
+
 #[derive(
     Allocative,
     Clone,
@@ -532,6 +542,7 @@ pub struct DaemonStartupConfig {
     pub resource_control: ResourceControlConfig,
     pub log_download_method: LogDownloadMethod,
     pub log_upload_method: LogUploadMethod,
+    pub rage_upload_method: RageUploadMethod,
     pub health_check_config: HealthCheckConfig,
     pub retained_event_logs: usize,
     pub macos_qos_class: Option<String>,
@@ -644,6 +655,25 @@ impl DaemonStartupConfig {
             resource_control: ResourceControlConfig::from_config(config)?,
             log_download_method,
             log_upload_method,
+            rage_upload_method: {
+                let rage_upload_cmd = config.get(BuckconfigKeyRef {
+                    section: "buck2",
+                    property: "rage_upload_cmd",
+                });
+                if let Some(cmd) = rage_upload_cmd {
+                    if cmd.is_empty() {
+                        return Err(buck2_error::buck2_error!(
+                            buck2_error::ErrorTag::Input,
+                            "rage_upload_cmd is set but empty"
+                        ));
+                    }
+                    RageUploadMethod::Command(cmd.to_owned())
+                } else if cfg!(fbcode_build) && !buck2_core::is_open_source() {
+                    RageUploadMethod::Internal
+                } else {
+                    RageUploadMethod::None
+                }
+            },
             health_check_config: HealthCheckConfig::from_config(config)?,
             retained_event_logs: config
                 .get(BuckconfigKeyRef {
@@ -708,6 +738,11 @@ impl DaemonStartupConfig {
                 LogUploadMethod::Manifold
             } else {
                 LogUploadMethod::None
+            },
+            rage_upload_method: if cfg!(fbcode_build) {
+                RageUploadMethod::Internal
+            } else {
+                RageUploadMethod::None
             },
             health_check_config: HealthCheckConfig::default(),
             retained_event_logs: DEFAULT_RETAINED_EVENT_LOGS,
