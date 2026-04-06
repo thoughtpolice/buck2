@@ -1,0 +1,37 @@
+{
+    "files.insertFinalNewline": true,
+    "files.trimTrailingWhitespace": true,
+
+    "files.associations": {
+        ".buckconfig": "ini",
+        ".buckconfig.local": "ini",
+        "*.bzl": "starlark",
+        "*.bxl": "starlark",
+        "BUCK": "starlark",
+        "PACKAGE": "starlark",
+    },
+
+    "files.exclude": {
+        "**/.direnv": true,
+        "**/.jj": true,
+    },
+
+    "rust-analyzer.workspace.discoverConfig": {
+        "command": [
+            "${workspaceFolder}/bootstrap/rust-project",
+            "develop-json",
+            "--buck2-command=${workspaceFolder}/bootstrap/buck2",
+            "--sysroot-mode=rustc",
+            "{arg}"
+        ],
+        "progressLabel": "rust-analyzer[buck2]",
+        "filesToWatch": ["BUILD", "PACKAGE"]
+    },
+
+    "rust-analyzer.check.overrideCommand": [
+        "${workspaceFolder}/bootstrap/rust-project",
+        "check",
+        "--buck2-command=${workspaceFolder}/bootstrap/buck2",
+        "$saved_file",
+    ]
+}
