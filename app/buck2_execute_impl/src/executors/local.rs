@@ -742,6 +742,8 @@ impl LocalExecutor {
         // (workers are long-lived processes incompatible with per-action sandboxing).
         let effective_sandbox_mode = if worker.is_some() {
             LocalSandboxMode::Disabled
+        } else if request.disable_local_sandbox() {
+            LocalSandboxMode::Disabled
         } else {
             buck2_sandbox::effective_sandbox_mode(self.sandbox_mode)
         };
