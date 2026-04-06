@@ -22,6 +22,7 @@ use buck2_core::execution_types::executor_config::CommandGenerationOptions;
 use buck2_core::execution_types::executor_config::Executor;
 use buck2_core::execution_types::executor_config::HybridExecutionLevel;
 use buck2_core::execution_types::executor_config::LocalExecutorOptions;
+use buck2_core::execution_types::executor_config::LocalSandboxMode;
 use buck2_core::execution_types::executor_config::MetaInternalExtraParams;
 use buck2_core::execution_types::executor_config::PathSeparatorKind;
 use buck2_core::execution_types::executor_config::ReGangWorker;
@@ -201,6 +202,21 @@ impl HasCommandExecutor for CommandExecutorFactory {
             } else {
                 None
             };
+
+            // When persistent workers are in use for this action, sandbox is
+            // incompatible — workers are long-lived processes. Fall back.
+            let sandbox_mode = if options.use_persistent_workers
+                && options.sandbox_mode != LocalSandboxMode::Disabled
+            {
+                tracing::warn!(
+                    "Sandbox mode `{:?}` incompatible with persistent workers, falling back to Disabled",
+                    options.sandbox_mode,
+                );
+                LocalSandboxMode::Disabled
+            } else {
+                options.sandbox_mode
+            };
+
             LocalExecutor::new(
                 artifact_fs.dupe(),
                 self.materializer.dupe(),
@@ -214,6 +230,7 @@ impl HasCommandExecutor for CommandExecutorFactory {
                 self.memory_tracker.dupe(),
                 self.daemon_id.dupe(),
                 self.invocation_re_use_case,
+                sandbox_mode,
             )
         };
 
