@@ -37,6 +37,7 @@ use tokio::io;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncSeekExt;
 use tokio::io::AsyncWriteExt;
+use tokio::process::ChildStdin;
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 use tokio::time::Instant;
@@ -63,6 +64,12 @@ pub struct PersistEventLogsCommand {
     local_path: String,
     #[clap(long, help = "If present, only write to disk and don't upload")]
     no_upload: bool,
+    #[clap(
+        long,
+        help = "Custom command to pipe log data into for upload. \
+                Receives the raw log stream on stdin."
+    )]
+    upload_cmd: Option<String>,
     #[clap(
         long,
         help = "UUID of invocation that called this subcommand for logging purposes"
@@ -121,11 +128,52 @@ impl PersistEventLogsCommand {
                 );
             }
         };
-        let write = write_task(&file, tx, stdin);
+
+        // Spawn custom upload command if configured, pipe log data to its stdin.
+        let mut custom_child = None;
+        let custom_stdin = if let Some(ref cmd) = self.upload_cmd {
+            match spawn_upload_cmd(cmd) {
+                Ok((child, pipe)) => {
+                    custom_child = Some(child);
+                    Some(pipe)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to spawn upload command: {:#}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let write = write_task(&file, tx, stdin, custom_stdin);
         let upload = upload_task(&file, rx, self.manifold_name, self.no_upload);
 
         // Wait for both tasks to finish. If the upload fails we want to keep writing to disk
         let (write_result, upload_result) = tokio::join!(write, upload);
+
+        // Wait for custom upload command to finish.
+        if let Some(child) = custom_child {
+            match tokio::time::timeout(Duration::from_secs(120), child.wait_with_output()).await {
+                Ok(Ok(output)) => {
+                    if !output.status.success() {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        tracing::warn!(
+                            "Upload command exited with status `{}`. Stderr: `{}`",
+                            output.status,
+                            stderr.trim(),
+                        );
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("Error waiting for upload command: {:#}", e);
+                }
+                Err(_) => {
+                    tracing::warn!("Upload command timed out after 120s");
+                }
+            }
+        }
+
         (write_result, upload_result)
     }
 }
@@ -134,6 +182,7 @@ async fn write_task(
     file_mutex: &Mutex<File>,
     tx: tokio::sync::mpsc::UnboundedSender<u64>,
     mut stdin: impl io::AsyncBufRead + Unpin,
+    mut custom_stdin: Option<ChildStdin>,
 ) -> buck2_error::Result<()> {
     let mut write_position = 0;
     let mut buf = vec![0; 64 * 1024]; // maximum pipe size in linux
@@ -147,7 +196,19 @@ async fn write_task(
         drop(file);
         write_position += bytes_read as u64;
         let _ignored = tx.send(bytes_read as u64); // If this errors, that means the upload task died.
+
+        // Tee data to custom upload command. On error, stop writing to it
+        // but continue the disk write.
+        if let Some(ref mut pipe) = custom_stdin {
+            if pipe.write_all(&buf[..bytes_read]).await.is_err() {
+                tracing::warn!("Upload command stdin closed, stopping tee");
+                custom_stdin = None;
+            }
+        }
     }
+
+    // Close the custom command's stdin so it knows we're done.
+    drop(custom_stdin);
 
     Ok(())
 }
@@ -342,6 +403,20 @@ fn categorize_error(err: &buck2_error::Error) -> &'static str {
     } else {
         "persist_log_other"
     }
+}
+
+fn spawn_upload_cmd(
+    cmd: &str,
+) -> buck2_error::Result<(tokio::process::Child, ChildStdin)> {
+    let mut child = tokio::process::Command::new("sh")
+        .args(["-c", cmd])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .with_buck_error_context(|| format!("Failed to spawn upload command: {}", cmd))?;
+    let pipe = child.stdin.take().expect("stdin was piped");
+    Ok((child, pipe))
 }
 
 async fn dispatch_event_to_scribe(
