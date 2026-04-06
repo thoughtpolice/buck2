@@ -19,6 +19,7 @@ use buck2_core::execution_types::executor_config::Executor;
 use buck2_core::execution_types::executor_config::HybridExecutionLevel;
 use buck2_core::execution_types::executor_config::ImagePackageIdentifier;
 use buck2_core::execution_types::executor_config::LocalExecutorOptions;
+use buck2_core::execution_types::executor_config::LocalSandboxMode;
 use buck2_core::execution_types::executor_config::MetaInternalExtraParams;
 use buck2_core::execution_types::executor_config::PathSeparatorKind;
 use buck2_core::execution_types::executor_config::ReGang;
@@ -157,6 +158,7 @@ pub fn register_command_executor_config(builder: &mut GlobalsBuilder) {
         #[starlark(default = false, require = named)] allow_hybrid_fallbacks_on_failure: bool,
         #[starlark(default = false, require = named)] use_windows_path_separators: bool,
         #[starlark(default = false, require = named)] use_persistent_workers: bool,
+        #[starlark(default = NoneOr::None, require = named)] local_sandbox_mode: NoneOr<&str>,
         #[starlark(default = false, require = named)] use_bazel_protocol_remote_persistent_workers: bool,
         #[starlark(default = false, require = named)] allow_cache_uploads: bool,
         #[starlark(default = NoneOr::None, require = named)] max_cache_upload_mebibytes: NoneOr<
@@ -253,9 +255,17 @@ pub fn register_command_executor_config(builder: &mut GlobalsBuilder) {
                 Some(re_action_key.to_owned())
             };
 
+            let sandbox_mode = local_sandbox_mode
+                .into_option()
+                .map(|s| s.parse::<LocalSandboxMode>())
+                .transpose()
+                .buck_error_context("Invalid local_sandbox_mode")?
+                .unwrap_or_default();
+
             let local_options = if local_enabled {
                 Some(LocalExecutorOptions {
                     use_persistent_workers,
+                    sandbox_mode,
                 })
             } else {
                 None
