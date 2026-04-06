@@ -582,6 +582,7 @@ pub struct DaemonStartupConfig {
     pub daemon_idle_timeout_s: Option<u64>,
     /// Pagable DICE storage settings, or `None` when paging is disabled.
     pub hydration: Option<HydrationConfig>,
+    pub test_builds_targets: bool,
 }
 
 impl DaemonStartupConfig {
@@ -694,6 +695,12 @@ impl DaemonStartupConfig {
                 property: "daemon_idle_timeout_s",
             })?,
             hydration: HydrationConfig::from_config(config)?,
+            test_builds_targets: config
+                .parse(BuckconfigKeyRef {
+                    section: "buck2",
+                    property: "test_builds_targets",
+                })?
+                .unwrap_or(false),
         })
     }
 
@@ -726,6 +733,7 @@ impl DaemonStartupConfig {
             macos_qos_class: None,
             daemon_idle_timeout_s: None,
             hydration: None,
+            test_builds_targets: false,
         }
     }
 }
