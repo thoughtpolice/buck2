@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use buck2_agent_interactive::Advice;
 use buck2_common::argv::Argv;
 use buck2_common::argv::SanitizedArgv;
+use buck2_common::init::LogUploadMethod;
 use buck2_common::invocation_paths::DEFAULT_ISOLATION_DIR;
 use buck2_common::invocation_paths::InvocationPaths;
 use buck2_error::ErrorTag;
@@ -343,6 +344,11 @@ fn get_event_log_subscriber<T: StreamingCommand>(
     let user_event_log = cmd.user_event_log();
 
     let logdir = paths.log_dir();
+    let log_upload_method = ctx
+        .immediate_config
+        .root_config()
+        .and_then(LogUploadMethod::from_buckconfig)
+        .unwrap_or(LogUploadMethod::None);
     let log = EventLog::new(
         logdir,
         ctx.working_dir.clone(),
@@ -358,6 +364,7 @@ fn get_event_log_subscriber<T: StreamingCommand>(
         ctx.buck_settings()
             .map(|settings| settings.invocation.event_log.retained_logs())
             .unwrap_or_else(|_| buck2_settings::EventLog::default().retained_logs()),
+        log_upload_method,
     );
     Box::new(log)
 }

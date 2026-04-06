@@ -441,6 +441,40 @@ pub enum LogDownloadMethod {
     None,
 }
 
+/// How the client streams its event log. Read by the client from its own buckconfig on every
+/// command, rather than carried in [`DaemonStartupOptions`]: the daemon never uses it, and a
+/// startup option would make checkouts with different upload commands incompatible daemon
+/// tenants.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LogUploadMethod {
+    Manifold,
+    Command(String),
+    None,
+}
+
+impl LogUploadMethod {
+    pub fn from_buckconfig(config: &LegacyBuckConfig) -> buck2_error::Result<Self> {
+        let log_upload_cmd = config.get(BuckconfigKeyRef {
+            section: "buck2",
+            property: "log_upload_cmd",
+        });
+        if let Some(cmd) = log_upload_cmd {
+            if cmd.is_empty() {
+                Err(buck2_error::buck2_error!(
+                    buck2_error::ErrorTag::Input,
+                    "log_upload_cmd is set but empty"
+                ))
+            } else {
+                Ok(LogUploadMethod::Command(cmd.to_owned()))
+            }
+        } else if cfg!(fbcode_build) && !buck2_core::is_open_source() {
+            Ok(LogUploadMethod::Manifold)
+        } else {
+            Ok(LogUploadMethod::None)
+        }
+    }
+}
+
 /// Pagable DICE storage settings, present (`Some`) only when paging is enabled by
 /// the `hydration` Buck settings. `page_out_on_idle` also implies paging is
 /// enabled. When present, the daemon
@@ -568,6 +602,10 @@ impl DaemonStartupConfig {
                 LogDownloadMethod::None
             }
         };
+
+        // Not a startup option (see `LogUploadMethod`), but an empty command should still fail
+        // the command, and the streaming client has nowhere to report it.
+        LogUploadMethod::from_buckconfig(config)?;
 
         let startup_options = DaemonStartupOptions {
             share_dice: config
