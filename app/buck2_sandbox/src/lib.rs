@@ -38,9 +38,9 @@ pub fn effective_sandbox_mode(requested: LocalSandboxMode) -> LocalSandboxMode {
             LocalSandboxMode::Symlink
         }
         #[cfg(all(unix, not(target_os = "linux")))]
-        LocalSandboxMode::Symlink => LocalSandboxMode::Symlink,
+        LocalSandboxMode::Symlink | LocalSandboxMode::Native => LocalSandboxMode::Symlink,
         #[cfg(target_os = "linux")]
-        LocalSandboxMode::Landlock => {
+        LocalSandboxMode::Landlock | LocalSandboxMode::Native => {
             if landlock::landlock_abi_version().is_some() {
                 LocalSandboxMode::Landlock
             } else {
