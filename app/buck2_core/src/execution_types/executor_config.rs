@@ -27,15 +27,53 @@ use starlark_map::sorted_map::SortedMap;
 use static_interner::Intern;
 use static_interner::interner;
 
+#[derive(Debug, Default, Eq, Hash, PartialEq, Clone, Copy, Dupe, Allocative, Pagable)]
+pub enum LocalSandboxMode {
+    #[default]
+    Disabled,
+    /// Symlink farm: inputs symlinked into temp dir, action runs there.
+    Symlink,
+    /// Symlink farm + Landlock kernel enforcement. Falls back to Symlink
+    /// if Landlock unavailable.
+    Landlock,
+    /// Automatic: Landlock on Linux, Symlink elsewhere.
+    Native,
+}
+
+#[derive(Debug, buck2_error::Error)]
+#[buck2(input)]
+enum LocalSandboxModeError {
+    #[error(
+        "Invalid local_sandbox_mode: `{0}`. Expected one of: \"disabled\", \"symlink\", \"landlock\", \"native\""
+    )]
+    InvalidMode(String),
+}
+
+impl FromStr for LocalSandboxMode {
+    type Err = buck2_error::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "disabled" => Ok(LocalSandboxMode::Disabled),
+            "symlink" => Ok(LocalSandboxMode::Symlink),
+            "landlock" => Ok(LocalSandboxMode::Landlock),
+            "native" => Ok(LocalSandboxMode::Native),
+            _ => Err(LocalSandboxModeError::InvalidMode(s.to_owned()).into()),
+        }
+    }
+}
+
 #[derive(Debug, Eq, Hash, PartialEq, Clone, Dupe, Allocative, Pagable)]
 pub struct LocalExecutorOptions {
     pub use_persistent_workers: bool,
+    pub sandbox_mode: LocalSandboxMode,
 }
 
 impl Default for LocalExecutorOptions {
     fn default() -> Self {
         Self {
             use_persistent_workers: true,
+            sandbox_mode: LocalSandboxMode::Disabled,
         }
     }
 }

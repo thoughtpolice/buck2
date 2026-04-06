@@ -78,6 +78,7 @@ struct ValidatedCommand {
     command_cgroup: Option<CgroupPathBuf>,
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     network_access: Option<buck2_data::NetworkAccess>,
+    landlock: Option<buck2_forkserver_proto::LandlockConfig>,
 }
 
 impl ValidatedCommand {
@@ -93,6 +94,7 @@ impl ValidatedCommand {
             graceful_shutdown_timeout_s,
             command_cgroup,
             network_access,
+            landlock,
         } = cmd_request;
 
         let exe = OsStr::from_bytes(&exe);
@@ -135,6 +137,7 @@ impl ValidatedCommand {
                 .map(buck2_data::NetworkAccess::try_from)
                 .transpose()
                 .map_err(|v| internal_error!("Invalid network_access value: {}", v))?,
+            landlock,
         })
     }
 }
@@ -240,6 +243,19 @@ impl UnixForkserverService {
                     .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
                 });
             }
+        }
+
+        // Apply Landlock rules if configured.
+        #[cfg(target_os = "linux")]
+        if let Some(landlock_config) = &validated_cmd.landlock {
+            let read_paths: Vec<PathBuf> =
+                landlock_config.read_paths.iter().map(PathBuf::from).collect();
+            let write_paths: Vec<PathBuf> =
+                landlock_config.write_paths.iter().map(PathBuf::from).collect();
+            let rules =
+                buck2_sandbox::landlock::LandlockRules::prepare(&read_paths, &write_paths)
+                    .buck_error_context("Failed to prepare Landlock rules")?;
+            buck2_sandbox::landlock::setup_landlock_pre_exec(&mut cmd, rules);
         }
 
         // cmd: ready-to-spawn process command
