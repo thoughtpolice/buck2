@@ -171,6 +171,11 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
     ///     * When `true`, this action will run without a sandbox even if the executor has sandboxing
     ///       enabled. Useful for actions that need to read absolute paths outside the project,
     ///       require network access, or have known hermiticity issues.
+    /// * `clear_environment`: clears all inherited environment variables before running the action (default: `false`)
+    ///     * When `true`, the action starts with an empty environment. Only variables explicitly
+    ///       set via the `env` parameter will be available to the action.
+    ///     * Useful for actions that are sensitive to ambient environment state, e.g. programs
+    ///       with hardcoded limits on envp entry sizes.
     /// * The `prefer_local`, `prefer_remote` and `local_only` options allow selecting where the
     /// action should run if the executor selected for this target is a hybrid executor.
     ///     * All those options disable concurrent execution: the action will run on the preferred
@@ -279,6 +284,7 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
         >,
         #[starlark(require = named, default = false)] unique_input_inodes: bool,
         #[starlark(require = named, default = false)] disable_local_sandbox: bool,
+        #[starlark(require = named, default = false)] clear_environment: bool,
         #[starlark(require = named, default = NoneOr::None)] error_handler: NoneOr<
             StarlarkCallable<'v>,
         >,
@@ -615,6 +621,7 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
             force_full_hybrid_if_capable,
             unique_input_inodes,
             disable_local_sandbox,
+            clear_environment,
             remote_execution_dependencies: re_dependencies,
             re_gang_workers,
             remote_execution_custom_image: re_custom_image,
