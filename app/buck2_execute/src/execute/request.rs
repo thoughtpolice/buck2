@@ -407,6 +407,9 @@ pub struct CommandExecutionRequest {
     skip_resource_control: bool,
 
     network_access: Option<NetworkAccess>,
+    /// Whether to disable local sandboxing for this specific action,
+    /// even when the executor has sandboxing enabled.
+    disable_local_sandbox: bool,
 }
 
 impl CommandExecutionRequest {
@@ -445,6 +448,7 @@ impl CommandExecutionRequest {
             is_test: false,
             skip_resource_control: false,
             network_access: None,
+            disable_local_sandbox: false,
         }
     }
 
@@ -742,6 +746,15 @@ impl CommandExecutionRequest {
 
     pub fn network_access(&self) -> Option<NetworkAccess> {
         self.network_access
+    }
+
+    pub fn with_disable_local_sandbox(mut self, disable_local_sandbox: bool) -> Self {
+        self.disable_local_sandbox = disable_local_sandbox;
+        self
+    }
+
+    pub fn disable_local_sandbox(&self) -> bool {
+        self.disable_local_sandbox
     }
 }
 
