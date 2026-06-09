@@ -47,22 +47,7 @@ impl fmt::Display for ReHeaderLine<'_> {
         write!(f, "Network:")?;
         let mut separator = " ";
         if let Some(stats) = &self.stats {
-            match self.draw_mode {
-                DrawMode::Normal => write!(
-                    f,
-                    "{separator}up {} {}  down {} {}",
-                    HumanizedBytes::new(stats.re_upload_bytes),
-                    BytesPerSecond(stats.re_upload_bytes_per_second),
-                    HumanizedBytes::new(stats.download_bytes),
-                    BytesPerSecond(stats.download_bytes_per_second),
-                )?,
-                DrawMode::Final => write!(
-                    f,
-                    "{separator}up {}  down {}",
-                    HumanizedBytes::new(stats.re_upload_bytes),
-                    HumanizedBytes::new(stats.download_bytes),
-                )?,
-            }
+            write!(f, "{separator}{}", stats.display_up_down(self.draw_mode))?;
             separator = "  ";
         }
         if let Some(session_id) = self.session_id {
@@ -72,16 +57,39 @@ impl fmt::Display for ReHeaderLine<'_> {
     }
 }
 
-/// A transfer rate that renders as empty when zero, so idle directions stay blank
-/// in the header instead of showing `0 B/s`.
-struct BytesPerSecond(u64);
-
-impl fmt::Display for BytesPerSecond {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.0 == 0 {
-            Ok(())
-        } else {
-            write!(f, "{}", HumanizedBytesPerSecond::new(self.0))
+impl NetworkStats {
+    /// The `↑ X [rate] ↓ Y [rate]` cell shared by the console network lines;
+    /// transfer rates appear only in the live view and only when non-zero.
+    pub fn display_up_down(&self, draw_mode: DrawMode) -> impl fmt::Display + '_ {
+        struct Impl<'a> {
+            stats: &'a NetworkStats,
+            draw_mode: DrawMode,
+        }
+        impl fmt::Display for Impl<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                let rates = matches!(self.draw_mode, DrawMode::Normal);
+                write!(f, "↑ {}", HumanizedBytes::new(self.stats.re_upload_bytes))?;
+                if rates && self.stats.re_upload_bytes_per_second > 0 {
+                    write!(
+                        f,
+                        " {}",
+                        HumanizedBytesPerSecond::new(self.stats.re_upload_bytes_per_second)
+                    )?;
+                }
+                write!(f, " ↓ {}", HumanizedBytes::new(self.stats.download_bytes))?;
+                if rates && self.stats.download_bytes_per_second > 0 {
+                    write!(
+                        f,
+                        " {}",
+                        HumanizedBytesPerSecond::new(self.stats.download_bytes_per_second)
+                    )?;
+                }
+                Ok(())
+            }
+        }
+        Impl {
+            stats: self,
+            draw_mode,
         }
     }
 }

@@ -20,6 +20,8 @@ use buck2_core::execution_types::executor_config::ExecutorNetworkAccess;
 use buck2_core::execution_types::executor_config::HybridExecutionLevel;
 use buck2_core::execution_types::executor_config::ImagePackageIdentifier;
 use buck2_core::execution_types::executor_config::LocalExecutorOptions;
+use buck2_core::execution_types::executor_config::LocalSandboxMode;
+use buck2_core::execution_types::executor_config::LocalSandboxPaths;
 use buck2_core::execution_types::executor_config::MetaInternalExtraParams;
 use buck2_core::execution_types::executor_config::PathSeparatorKind;
 use buck2_core::execution_types::executor_config::ReGang;
@@ -126,6 +128,17 @@ pub fn register_command_executor_config(builder: &mut GlobalsBuilder) {
     /// * `allow_hybrid_fallbacks_on_failure`: Whether to allow fallbacks when the result is failure (i.e. the command failed on the primary, but the infra worked)
     /// * `use_windows_path_separators`: Whether to use Windows path separators in command line arguments
     /// * `use_persistent workers`: Whether to use persistent workers for local execution if they are available
+    /// * `local_sandbox_mode`: How to sandbox local actions. One of `disabled`, the default, `symlink`,
+    ///   `landlock`, or `native`, which picks `landlock` on Linux and `symlink` elsewhere.
+    /// * `local_sandbox_read_paths`: Absolute paths outside the project that sandboxed local actions may
+    ///   read and execute beneath. Setting this replaces the default list: `/bin`, `/usr/bin`,
+    ///   `/usr/local/bin`, `/sbin`, `/usr/sbin`, `/lib`, `/usr/lib`, `/lib64`, `/usr/lib64`, `/etc`,
+    ///   `/proc/self` and `/nix/store`. Paths that don't exist are ignored. Only enforced when the
+    ///   sandbox uses Landlock.
+    /// * `local_sandbox_write_paths`: Absolute paths outside the project that sandboxed local actions may
+    ///   read and write beneath. Setting this replaces the default list: `/dev/null`, `/dev/zero`,
+    ///   `/dev/urandom` and `/dev/random`. Paths that don't exist are ignored. Only enforced when the
+    ///   sandbox uses Landlock.
     /// * `use_bazel_protocol_remote_persistent_workers`: Whether to use persistent workers for remote execution via the Bazel remote persistent worker protocol if they are available
     /// * `allow_cache_uploads`: Whether to upload local actions to the RE cache
     /// * `max_cache_upload_mebibytes`: Maximum size to upload in cache uploads
@@ -166,6 +179,13 @@ pub fn register_command_executor_config(builder: &mut GlobalsBuilder) {
         #[starlark(default = false, require = named)] allow_hybrid_fallbacks_on_failure: bool,
         #[starlark(default = false, require = named)] use_windows_path_separators: bool,
         #[starlark(default = false, require = named)] use_persistent_workers: bool,
+        #[starlark(default = NoneOr::None, require = named)] local_sandbox_mode: NoneOr<&str>,
+        #[starlark(default = NoneOr::None, require = named)] local_sandbox_read_paths: NoneOr<
+            UnpackList<String>,
+        >,
+        #[starlark(default = NoneOr::None, require = named)] local_sandbox_write_paths: NoneOr<
+            UnpackList<String>,
+        >,
         #[starlark(default = false, require = named)] use_bazel_protocol_remote_persistent_workers: bool,
         #[starlark(default = false, require = named)] allow_cache_uploads: bool,
         #[starlark(default = NoneOr::None, require = named)] max_cache_upload_mebibytes: NoneOr<
@@ -263,9 +283,31 @@ pub fn register_command_executor_config(builder: &mut GlobalsBuilder) {
                 Some(re_action_key.to_owned())
             };
 
+            let sandbox_mode = local_sandbox_mode
+                .into_option()
+                .map(|s| s.parse::<LocalSandboxMode>())
+                .transpose()
+                .buck_error_context("Invalid local_sandbox_mode")?
+                .unwrap_or_default();
+
+            let sandbox_paths = Arc::new(LocalSandboxPaths {
+                read: local_sandbox_read_paths
+                    .into_option()
+                    .map(LocalSandboxPaths::parse_paths)
+                    .transpose()
+                    .buck_error_context("Invalid local_sandbox_read_paths")?,
+                write: local_sandbox_write_paths
+                    .into_option()
+                    .map(LocalSandboxPaths::parse_paths)
+                    .transpose()
+                    .buck_error_context("Invalid local_sandbox_write_paths")?,
+            });
+
             let local_options = if local_enabled {
                 Some(LocalExecutorOptions {
                     use_persistent_workers,
+                    sandbox_mode,
+                    sandbox_paths,
                 })
             } else {
                 None

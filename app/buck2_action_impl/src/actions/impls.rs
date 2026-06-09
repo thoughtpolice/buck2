@@ -14,6 +14,7 @@ pub(crate) mod copy;
 pub(crate) mod dep_file_fingerprint;
 pub(crate) mod download_file;
 pub(crate) mod offline;
+pub(crate) mod remote_asset;
 pub(crate) mod run;
 pub(crate) mod write;
 pub(crate) mod write_json;
