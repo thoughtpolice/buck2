@@ -97,6 +97,30 @@ pub fn display_configured_target_label(
     }
 }
 
+/// Format a test suite name for display in the console.
+///
+/// Either `$suite`, `$target`, or `$target ($suite)` depending on which information is present.
+fn display_test_suite(
+    target: Option<&ConfiguredTargetLabel>,
+    suite: &str,
+    opts: TargetDisplayOptions,
+) -> buck2_error::Result<String> {
+    let Some(target) = target else {
+        // If we don't have a target name, the suite is fine.
+        return Ok(suite.to_owned());
+    };
+    let unconfigured = target
+        .label
+        .as_ref()
+        .ok_or(ParseEventError::InvalidConfiguredTargetLabel)?;
+    let label = display_configured_target_label(target, opts)?;
+    if suite.is_empty() || suite == unconfigured.name {
+        Ok(label)
+    } else {
+        Ok(format!("{label} ({suite})"))
+    }
+}
+
 fn display_configured_target_label_opt(
     ctl: Option<&ConfiguredTargetLabel>,
     opts: TargetDisplayOptions,
@@ -413,7 +437,14 @@ pub fn display_event(
                 Ok(EventDisplay::bare(stage))
             }
             Data::TestDiscovery(discovery) => Ok(EventDisplay::labeled(
-                format!("Test {}", discovery.suite_name),
+                format!(
+                    "Test {}",
+                    display_test_suite(
+                        discovery.target_label.as_ref(),
+                        &discovery.suite_name,
+                        opts,
+                    )?
+                ),
                 "discovering tests",
             )),
             Data::TestRun(start) => match &start.suite {
@@ -430,7 +461,14 @@ pub fn display_event(
                         }
                     };
                     Ok(EventDisplay::labeled(
-                        format!("Test {}", suite.suite_name),
+                        format!(
+                            "Test {}",
+                            display_test_suite(
+                                suite.target_label.as_ref(),
+                                &suite.suite_name,
+                                opts,
+                            )?
+                        ),
                         tests,
                     ))
                 }
@@ -815,28 +853,15 @@ enum ParseEventError {
 #[buck2(tag = Tier0)]
 pub struct InvalidBuckEvent(pub Arc<BuckEvent>);
 
-pub fn format_test_result(
-    test_result: &buck2_data::TestResult,
-    verbosity: Verbosity,
-) -> buck2_error::Result<Option<Lines>> {
-    let buck2_data::TestResult {
-        name,
-        status,
-        duration,
-        details,
-        ..
-    } = test_result;
-    let status = TestStatus::try_from(*status)?;
-
-    // Pass results normally have no details, unless the --print-passing-details is set.
-    // Do not display anything for passing tests unless verbosity is high or details are present
-    // to avoid cluttering the UI with unimportant test results.
-    if matches!(&status, TestStatus::PASS | TestStatus::LISTING_SUCCESS)
-        && details.is_empty()
-        && !verbosity.print_all_commands()
-    {
-        return Ok(None);
-    }
+/// The single styled summary line for a test result: status prefix, name, and
+/// (when reported) duration. Shared by the scrollback formatter and the
+/// finished-tests window so both stay in sync.
+pub fn test_result_oneline(
+    status: i32,
+    name: &str,
+    duration: Option<Duration>,
+) -> buck2_error::Result<Line> {
+    let status = TestStatus::try_from(status)?;
 
     let prefix = match status {
         TestStatus::FAIL => Span::new_styled("✗ Fail".to_owned().red()),
@@ -854,25 +879,68 @@ pub fn format_test_result(
     // A test name is free text from the test runner, so it can hold a tab or a
     // line break (a title interpolating a value, say), which a `Span` refuses.
     let name = name.replace(|c: char| c != ' ' && c.is_whitespace(), " ");
-    let mut base = Line::from_iter([prefix, Span::new_unstyled(format!(": {name}",))?]);
+    let mut line = Line::from_iter([prefix, Span::new_unstyled(format!(": {name}",))?]);
 
     if let Some(duration) = duration {
-        if let Ok(duration) = Duration::try_from(*duration) {
-            base.push(Span::new_unstyled(format!(
-                " ({})",
-                fmt_duration::fmt_duration(duration)
-            ))?);
-        }
+        line.push(Span::new_unstyled(format!(
+            " ({})",
+            fmt_duration::fmt_duration(duration)
+        ))?);
     }
-    // If a test has details, we always show them. It's the test runner's
-    // responsibility to withhold details when these are not relevant.
-    // For instance, tpx will always withhold details of passing tests
-    // unless the --print-passing-details is set.
+    Ok(line)
+}
+
+/// The wall-clock duration of a finished test, if it was reported.
+pub fn test_result_duration(test_result: &buck2_data::TestResult) -> Option<Duration> {
+    test_result
+        .duration
+        .and_then(|duration| Duration::try_from(duration).ok())
+}
+
+pub fn format_test_result(
+    test_result: &buck2_data::TestResult,
+    verbosity: Verbosity,
+) -> buck2_error::Result<Option<Lines>> {
+    let buck2_data::TestResult {
+        name,
+        status,
+        details,
+        ..
+    } = test_result;
+
+    let base = test_result_oneline(*status, name, test_result_duration(test_result))?;
+
+    // Show details for non-passing tests always. For passing tests, only
+    // show details if the test_passing_details verbosity item is set
+    // (e.g. via --print-passing-details or -v=test_passing_details).
     let mut lines = vec![base];
-    if !details.is_empty() {
+    let is_passing = matches!(
+        TestStatus::try_from(*status)?,
+        TestStatus::PASS | TestStatus::LISTING_SUCCESS
+    );
+    if !details.is_empty() && (!is_passing || verbosity.print_test_passing_details()) {
         lines.append(&mut Lines::from_multiline_string(details, Default::default()).0);
     }
     Ok(Some(Lines(lines)))
+}
+
+/// Whether this test result is a problem (failure-like) result. Consoles
+/// hiding non-problem results (`[ui] slim_test_output`) still print these;
+/// the rest only show up in the live counters.
+pub fn is_test_result_problem(test_result: &buck2_data::TestResult) -> buck2_error::Result<bool> {
+    Ok(match TestStatus::try_from(test_result.status)? {
+        TestStatus::PASS
+        | TestStatus::LISTING_SUCCESS
+        | TestStatus::SKIP
+        | TestStatus::OMITTED
+        | TestStatus::RERUN => false,
+        TestStatus::FAIL
+        | TestStatus::FATAL
+        | TestStatus::TIMEOUT
+        | TestStatus::INFRA_FAILURE
+        | TestStatus::LISTING_FAILED
+        | TestStatus::UNKNOWN => true,
+    })
 }
 
 pub struct ActionErrorDisplay<'a> {
@@ -1417,6 +1485,115 @@ mod tests {
 
     use super::*;
 
+    fn test_target() -> ConfiguredTargetLabel {
+        ConfiguredTargetLabel {
+            label: Some(buck2_data::TargetLabel {
+                package: "my_cell//my_package".into(),
+                name: "my_test".into(),
+            }),
+            configuration: Some(buck2_data::Configuration {
+                full_name: "cfg".into(),
+            }),
+            execution_configuration: None,
+        }
+    }
+
+    fn test_span_start(data: Data) -> BuckEvent {
+        BuckEvent::new(
+            UNIX_EPOCH,
+            TraceId::new(),
+            Some(SpanId::next()),
+            None,
+            SpanStartEvent { data: Some(data) }.into(),
+        )
+    }
+
+    #[test]
+    fn test_suite_displays_full_target_label() -> buck2_error::Result<()> {
+        let display = display_test_suite(
+            Some(&test_target()),
+            "my_test",
+            TargetDisplayOptions::for_console(false),
+        )?;
+        assert_eq!(display, "my_cell//my_package:my_test");
+        Ok(())
+    }
+
+    #[test]
+    fn test_suite_displays_configuration_when_requested() -> buck2_error::Result<()> {
+        let display = display_test_suite(
+            Some(&test_target()),
+            "my_test",
+            TargetDisplayOptions::for_console(true),
+        )?;
+        assert_eq!(display, "my_cell//my_package:my_test (cfg)");
+        Ok(())
+    }
+
+    #[test]
+    fn test_suite_preserves_subtarget_name() -> buck2_error::Result<()> {
+        let display = display_test_suite(
+            Some(&test_target()),
+            "my_test[debug]",
+            TargetDisplayOptions::for_console(false),
+        )?;
+        assert_eq!(display, "my_cell//my_package:my_test (my_test[debug])");
+        Ok(())
+    }
+
+    #[test]
+    fn test_suite_preserves_distinct_suite_name() -> buck2_error::Result<()> {
+        let display = display_test_suite(
+            Some(&test_target()),
+            "named suite",
+            TargetDisplayOptions::for_console(false),
+        )?;
+        assert_eq!(display, "my_cell//my_package:my_test (named suite)");
+        Ok(())
+    }
+
+    #[test]
+    fn test_suite_falls_back_to_suite_name_without_target() -> buck2_error::Result<()> {
+        let display = display_test_suite(
+            None,
+            "legacy suite",
+            TargetDisplayOptions::for_console(false),
+        )?;
+        assert_eq!(display, "legacy suite");
+        Ok(())
+    }
+
+    #[test]
+    fn test_discovery_displays_target_and_discovery_message() -> buck2_error::Result<()> {
+        let event = test_span_start(Data::TestDiscovery(buck2_data::TestDiscoveryStart {
+            suite_name: "my_test".into(),
+            target_label: Some(test_target()),
+        }));
+        let display = display_event(&event, TargetDisplayOptions::for_console(false))?;
+        assert_eq!(
+            display.to_string(),
+            "Test my_cell//my_package:my_test -- discovering tests"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_run_displays_target_and_test_case_names() -> buck2_error::Result<()> {
+        let event = test_span_start(Data::TestRun(buck2_data::TestRunStart {
+            suite: Some(buck2_data::TestSuite {
+                suite_name: "my_test".into(),
+                test_names: vec!["first_case".into(), "second_case".into()],
+                target_label: Some(test_target()),
+            }),
+        }));
+        let display = display_event(&event, TargetDisplayOptions::for_console(false))?;
+        assert_eq!(
+            display.to_string(),
+            "Test my_cell//my_package:my_test -- first_case second_case"
+        );
+        Ok(())
+    }
+
     fn executor_stage_event(stage: buck2_data::executor_stage_start::Stage) -> BuckEvent {
         BuckEvent::new(
             UNIX_EPOCH,
@@ -1460,6 +1637,54 @@ mod tests {
             Some("local_finalize_outputs")
         );
         assert!(!is_active_execution_stage(&executor_stage_event(stage)));
+    }
+
+    fn test_result_with_details(status: TestStatus, details: &str) -> buck2_data::TestResult {
+        buck2_data::TestResult {
+            name: "example_test".to_owned(),
+            status: status.try_into().unwrap(),
+            details: details.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn problem_test_results() {
+        let problems = [
+            TestStatus::FAIL,
+            TestStatus::FATAL,
+            TestStatus::TIMEOUT,
+            TestStatus::INFRA_FAILURE,
+            TestStatus::LISTING_FAILED,
+            TestStatus::UNKNOWN,
+        ];
+        for status in problems {
+            assert!(is_test_result_problem(&test_result_with_details(status, "")).unwrap());
+        }
+
+        let non_problems = [
+            TestStatus::PASS,
+            TestStatus::LISTING_SUCCESS,
+            TestStatus::SKIP,
+            TestStatus::OMITTED,
+            TestStatus::RERUN,
+        ];
+        for status in non_problems {
+            assert!(!is_test_result_problem(&test_result_with_details(status, "")).unwrap());
+        }
+    }
+
+    #[test]
+    fn oneline_summary_has_prefix_and_name() {
+        let result = test_result_with_details(TestStatus::PASS, "");
+        let line = test_result_oneline(result.status, &result.name, test_result_duration(&result))
+            .unwrap();
+        let rendered = line.fmt_for_test().to_string();
+        assert!(rendered.contains("Pass"), "unexpected render: {rendered}");
+        assert!(
+            rendered.contains("example_test"),
+            "unexpected render: {rendered}"
+        );
     }
 
     fn action_execution_event(identifier: &str) -> BuckEvent {
@@ -1609,6 +1834,46 @@ mod tests {
         assert_eq!(display.category.as_deref(), Some("category"));
 
         Ok(())
+    }
+
+    #[test]
+    fn passing_test_without_details_still_has_summary() {
+        let lines = format_test_result(
+            &test_result_with_details(TestStatus::PASS, ""),
+            Verbosity::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(1, lines.0.len());
+    }
+
+    #[test]
+    fn passing_test_details_are_opt_in() {
+        let result = test_result_with_details(TestStatus::PASS, "test stdout");
+
+        let default_lines = format_test_result(&result, Verbosity::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(1, default_lines.0.len());
+
+        let verbose_lines = format_test_result(
+            &result,
+            Verbosity::try_from_cli("test_passing_details").unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(2, verbose_lines.0.len());
+    }
+
+    #[test]
+    fn failing_test_details_are_shown_by_default() {
+        let lines = format_test_result(
+            &test_result_with_details(TestStatus::FAIL, "test stderr"),
+            Verbosity::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(2, lines.0.len());
     }
 
     #[test]
