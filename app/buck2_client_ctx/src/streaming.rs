@@ -15,11 +15,13 @@ use async_trait::async_trait;
 use buck2_agent_interactive::Advice;
 use buck2_common::argv::Argv;
 use buck2_common::argv::SanitizedArgv;
+use buck2_common::init::LogUploadMethod;
 use buck2_common::invocation_paths::DEFAULT_ISOLATION_DIR;
 use buck2_common::invocation_paths::InvocationPaths;
 use buck2_error::ErrorTag;
 use buck2_error::ExitCode;
 use buck2_event_observer::span_tracker::EventTimestamp;
+use buck2_event_observer::verbosity::Verbosity;
 use dupe::Dupe;
 
 use crate::client_ctx::AgentAdvice;
@@ -97,10 +99,11 @@ fn update_events_ctx<T: StreamingCommand>(
         (None, None, None)
     };
 
+    let verbosity = cmd.adjust_verbosity(ctx.verbosity);
     let (console_subscriber, used_superconsole) = get_console_with_root(
         ctx.trace_id.dupe(),
         console_opts.console_type,
-        ctx.verbosity,
+        verbosity,
         expect_spans,
         Timekeeper::new(
             Box::new(RealtimeClock),
@@ -201,6 +204,10 @@ pub trait StreamingCommand: Sized + Send + Sync {
     fn build_config_opts(&self) -> &CommonBuildConfigurationOptions;
 
     fn starlark_opts(&self) -> &CommonStarlarkOptions;
+
+    fn adjust_verbosity(&self, verbosity: Verbosity) -> Verbosity {
+        verbosity
+    }
 
     fn extra_subscribers(&self) -> Vec<Box<dyn EventSubscriber>> {
         vec![]
@@ -348,6 +355,11 @@ fn get_event_log_subscriber<T: StreamingCommand>(
     let user_event_log = cmd.user_event_log();
 
     let logdir = paths.log_dir();
+    let log_upload_method = ctx
+        .immediate_config
+        .root_config()
+        .and_then(LogUploadMethod::from_buckconfig)
+        .unwrap_or(LogUploadMethod::None);
     let log = EventLog::new(
         logdir,
         ctx.working_dir.clone(),
@@ -363,6 +375,7 @@ fn get_event_log_subscriber<T: StreamingCommand>(
         ctx.buck_settings()
             .map(|settings| settings.invocation.event_log.retained_logs())
             .unwrap_or_else(|_| buck2_settings::EventLog::default().retained_logs()),
+        log_upload_method,
     );
     Box::new(log)
 }

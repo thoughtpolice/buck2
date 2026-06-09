@@ -258,21 +258,39 @@ fn test_find_imports() {
         ),
     );
 
-    assert_eq!(
-        &[
-            "root//imports/one.bzl@cell1",
-            "cell1//one.bzl",
-            "cell2//two.bzl@cell1",
-            "cell1//config/foo/other.bzl",
-            "cell1//config/bar/three.bzl",
-        ],
-        parse_result
-            .imports()
-            .iter()
-            .map(|e| e.1.to_string())
-            .collect::<Vec<_>>()
-            .as_slice()
-    );
+    let imports = parse_result
+        .imports()
+        .iter()
+        .map(|e| e.1.to_string())
+        .collect::<Vec<_>>();
+
+    #[cfg(fbcode_build)]
+    {
+        // Cell-segmentation of import paths
+        assert_eq!(
+            &[
+                "root//imports/one.bzl@cell1",
+                "cell1//one.bzl",
+                "cell2//two.bzl@cell1",
+                "cell1//config/foo/other.bzl",
+                "cell1//config/bar/three.bzl",
+            ],
+            imports.as_slice(),
+        );
+    }
+    #[cfg(not(fbcode_build))]
+    {
+        assert_eq!(
+            &[
+                "root//imports/one.bzl",
+                "cell1//one.bzl",
+                "cell2//two.bzl",
+                "cell1//config/foo/other.bzl",
+                "cell1//config/bar/three.bzl",
+            ],
+            imports.as_slice()
+        );
+    }
 }
 
 #[test]

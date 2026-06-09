@@ -349,6 +349,49 @@ async fn test_anon_targets(buck: &Buck) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[buck_test(data_dir = "actions")]
+async fn test_download_remote_asset_analysis(buck: &Buck) -> anyhow::Result<()> {
+    let file_query = buck
+        .aquery(&[
+            "//remote_asset:valid_file",
+            "-a",
+            "kind",
+            "-a",
+            "category",
+            "-a",
+            "buck.all_outputs_are_content_based",
+        ])
+        .await?;
+    assert!(file_query.stdout.contains(r#""kind": "remoteasset""#));
+    assert!(file_query.stdout.contains(r#""category": "remote_asset""#));
+    assert!(
+        file_query
+            .stdout
+            .contains(r#""buck.all_outputs_are_content_based": "true""#)
+    );
+
+    let directory_query = buck
+        .aquery(&[
+            "//remote_asset:valid_directory",
+            "-a",
+            "kind",
+            "-a",
+            "category",
+        ])
+        .await?;
+    assert!(directory_query.stdout.contains(r#""kind": "remoteasset""#));
+
+    buck.aquery(&["//remote_asset:empty_urls"])
+        .await
+        .expect_failure()
+        .assert_stderr_matches("download_remote_asset requires at least one URL");
+    buck.aquery(&["//remote_asset:executable_directory"])
+        .await
+        .expect_failure()
+        .assert_stderr_matches("is_executable is only valid for Remote Asset file outputs");
+    Ok(())
+}
+
 /// 33 anon targets that differ only in a `lib_NNNN` label each get their own configuration-based
 /// output path and content.
 #[buck_test(data_dir = "actions")]

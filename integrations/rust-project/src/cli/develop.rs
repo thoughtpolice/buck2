@@ -40,6 +40,7 @@ pub(crate) struct Develop {
     pub(crate) invoked_by_ra: bool,
     pub(crate) include_all_buildfiles: bool,
     pub(crate) rustc_target: Option<String>,
+    pub(crate) test_runnable_args: Option<Vec<String>>,
 }
 
 pub(crate) struct OutputCfg {
@@ -71,6 +72,7 @@ impl Develop {
             mode,
             check_cycles,
             buck2_command,
+            test_runnable,
             include_all_buildfiles,
             max_extra_targets,
             rustc_target,
@@ -106,6 +108,7 @@ impl Develop {
                 invoked_by_ra: false,
                 include_all_buildfiles,
                 rustc_target,
+                test_runnable_args: test_runnable.map(|runnable| runnable.0),
             };
             let max_extra_targets = max_extra_targets.unwrap_or(DEFAULT_EXTRA_TARGETS);
             let out = OutputCfg {
@@ -128,6 +131,7 @@ impl Develop {
             sysroot_mode,
             args,
             buck2_command,
+            test_runnable,
             max_extra_targets,
             mode,
             rustc_target,
@@ -159,6 +163,7 @@ impl Develop {
                 invoked_by_ra: true,
                 include_all_buildfiles: false,
                 rustc_target,
+                test_runnable_args: test_runnable.map(|runnable| runnable.0),
             };
             let max_extra_targets = max_extra_targets.unwrap_or(DEFAULT_EXTRA_TARGETS);
             let out = OutputCfg {
@@ -292,6 +297,7 @@ impl Develop {
             check_cycles,
             include_all_buildfiles,
             rustc_target,
+            test_runnable_args,
             ..
         } = self;
 
@@ -335,6 +341,7 @@ impl Develop {
             global_extra_cfgs,
             first_party_extra_cfgs,
             rustc_target.as_ref(),
+            test_runnable_args.as_deref(),
         )
     }
 
@@ -374,6 +381,7 @@ pub(crate) fn develop_with_sysroot(
     global_extra_cfgs: &[String],
     first_party_extra_cfgs: &[String],
     rustc_target: Option<&String>,
+    test_runnable_args: Option<&[String]>,
 ) -> Result<ProjectJson, anyhow::Error> {
     info!(kind = "progress", "building generated code");
     let expanded_and_resolved = buck.expand_and_resolve(&targets, exclude_workspaces)?;
@@ -383,6 +391,7 @@ pub(crate) fn develop_with_sysroot(
         buck.query_aliased_libraries(&expanded_and_resolved.expanded_targets, &targets)?;
 
     info!(kind = "progress", "generating rust-project.json");
+    let project_root = buck.resolve_project_root()?;
     let rust_project = to_project_json(
         sysroot,
         expanded_and_resolved,
@@ -391,8 +400,10 @@ pub(crate) fn develop_with_sysroot(
         include_all_buildfiles,
         global_extra_cfgs,
         first_party_extra_cfgs,
+        &project_root,
         buck,
         rustc_target,
+        test_runnable_args,
     )?;
 
     Ok(rust_project)

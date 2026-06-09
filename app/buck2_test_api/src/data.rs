@@ -191,7 +191,9 @@ pub struct TestResultEntry {
     pub status: TestStatus,
     /// Optional failure/error message.
     pub message: Option<String>,
-    /// Optional detailed output (stdout/stderr excerpts).
+    /// Optional detailed output (stdout/stderr excerpts). The internal runner
+    /// uses the raw execution output for pass/failure results when this is
+    /// omitted.
     pub details: Option<String>,
     /// Optional duration of the test run.
     pub duration: Option<Duration>,
