@@ -20,6 +20,7 @@ use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_events::dispatch::span_async;
 use buck2_execute::execute::action_digest::ActionDigest;
 use buck2_execute::execute::action_digest::ActionDigestKind;
+use buck2_execute::execute::blocking::BlockingExecutor;
 use buck2_execute::execute::dep_file_digest::DepFileDigest;
 use buck2_execute::execute::kind::CommandExecutionKind;
 use buck2_execute::execute::kind::RemoteCommandExecutionDetails;
@@ -49,6 +50,7 @@ use crate::sqlite::incremental_state_db::IncrementalDbState;
 pub struct ActionCacheChecker {
     pub artifact_fs: ArtifactFs,
     pub materializer: Arc<dyn Materializer>,
+    pub blocking_executor: Arc<dyn BlockingExecutor>,
     pub incremental_db_state: Arc<IncrementalDbState>,
     pub re_client: ManagedRemoteExecutionClient,
     /// The buck2 invocation's, for what a cache hit materializes; the cache queries themselves
@@ -80,6 +82,7 @@ async fn query_action_cache_and_download_result(
     cache_type: CacheType,
     artifact_fs: &ArtifactFs,
     materializer: &dyn Materializer,
+    blocking_executor: &dyn BlockingExecutor,
     incremental_db_state: &Arc<IncrementalDbState>,
     re_client: &ManagedRemoteExecutionClient,
     invocation_re_use_case: RemoteExecutorUseCase,
@@ -197,6 +200,7 @@ async fn query_action_cache_and_download_result(
         request,
         TimeSpan::start_now(),
         materializer,
+        blocking_executor,
         re_client,
         invocation_re_use_case,
         digest_config,
@@ -289,6 +293,7 @@ impl PreparedCommandOptionalExecutor for ActionCacheChecker {
             cache_type,
             &self.artifact_fs,
             self.materializer.as_ref(),
+            self.blocking_executor.as_ref(),
             &self.incremental_db_state,
             &self.re_client,
             self.invocation_re_use_case,
@@ -310,6 +315,7 @@ impl PreparedCommandOptionalExecutor for ActionCacheChecker {
 pub struct RemoteDepFileCacheChecker {
     pub artifact_fs: ArtifactFs,
     pub materializer: Arc<dyn Materializer>,
+    pub blocking_executor: Arc<dyn BlockingExecutor>,
     pub incremental_db_state: Arc<IncrementalDbState>,
     pub re_client: ManagedRemoteExecutionClient,
     /// The buck2 invocation's, for what a cache hit materializes; the cache queries themselves
@@ -360,6 +366,7 @@ impl PreparedCommandOptionalExecutor for RemoteDepFileCacheChecker {
             cache_type,
             &self.artifact_fs,
             self.materializer.as_ref(),
+            self.blocking_executor.as_ref(),
             &self.incremental_db_state,
             &self.re_client,
             self.invocation_re_use_case,

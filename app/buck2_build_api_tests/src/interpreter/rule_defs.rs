@@ -11,4 +11,5 @@
 pub(crate) mod artifact;
 pub(crate) mod artifact_tagging;
 pub(crate) mod cmd_args;
+pub(crate) mod command_executor_config;
 pub(crate) mod provider;
