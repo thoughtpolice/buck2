@@ -113,9 +113,19 @@ mod tests {
         let repo_root = AbsNormPathBuf::try_from(temp_dir.path().to_path_buf())
             .expect("the temporary directory should be absolute");
         // Stop hg from discovering an enclosing checkout when TMPDIR is inside one.
+        // The directory alone is not enough: Mercurial treats an empty `.hg` as a
+        // valid repository with no commits and reports the null revision, which
+        // `compute_revision` would return without ever falling back to git. An
+        // unknown requirement makes hg abort here instead, as intended.
         tokio::fs::create_dir(repo_root.as_path().join(".hg"))
             .await
             .expect("creating an invalid hg metadata directory should succeed");
+        tokio::fs::write(
+            repo_root.as_path().join(".hg").join("requires"),
+            "buck2-test-not-a-real-repo\n",
+        )
+        .await
+        .expect("writing an unknown hg requirement should succeed");
         git(&repo_root, &["init", "-q"]).await;
         tokio::fs::write(repo_root.as_path().join("file.txt"), contents)
             .await
