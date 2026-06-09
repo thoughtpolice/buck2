@@ -12,6 +12,7 @@ pub(crate) mod cas_artifact;
 pub(crate) mod copy;
 pub(crate) mod download_file;
 pub(crate) mod offline;
+pub(crate) mod remote_asset;
 pub(crate) mod run;
 pub(crate) mod symlinked_dir;
 pub(crate) mod write;

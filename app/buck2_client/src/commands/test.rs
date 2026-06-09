@@ -135,6 +135,13 @@ If include patterns are present, regardless of whether exclude patterns are pres
     )]
     build_filtered_targets: bool, // TODO(bobyf) this flag should always override the buckconfig option when we use it
 
+    #[clap(
+        long = "no-default-test-filters",
+        alias = "no_default_test_filters",
+        help = "Ignore the `[test] default_exclude_labels` / `default_include_labels` buckconfig defaults, applying only the `--exclude` / `--include` filters passed on the command line."
+    )]
+    no_default_test_filters: bool,
+
     /// Will allow tests that are compatible with RE (setup to run from the repo root and
     /// use relative paths) to run from RE.
     #[clap(long, group = "re_options", alias = "unstable-allow-tests-on-re")]
@@ -189,7 +196,6 @@ If include patterns are present, regardless of whether exclude patterns are pres
     build_default_info: bool,
 
     /// Do not build DefaultInfo provider (this is the default)
-    #[allow(unused)]
     #[clap(long, group = "default-info")]
     skip_default_info: bool,
 
@@ -198,7 +204,6 @@ If include patterns are present, regardless of whether exclude patterns are pres
     build_run_info: bool,
 
     /// Do not build RunInfo provider (this is the default)
-    #[allow(unused)]
     #[clap(long, group = "run-info")]
     skip_run_info: bool,
 
@@ -397,6 +402,23 @@ impl StreamingCommand for TestCommand {
         }
 
         let context = ctx.client_context(matches, &self)?;
+
+        let build_default_info = if self.skip_default_info {
+            false
+        } else if self.build_default_info {
+            true
+        } else {
+            ctx.test_builds_targets()?
+        };
+
+        let build_run_info = if self.skip_run_info {
+            false
+        } else if self.build_run_info {
+            true
+        } else {
+            ctx.test_builds_targets()?
+        };
+
         let response = buckd
             .with_flushing()
             .test(
@@ -420,8 +442,9 @@ impl StreamingCommand for TestCommand {
                     }),
                     timeout: self.timeout_options.overall_timeout()?,
                     ignore_tests_attribute: self.ignore_tests_attribute,
-                    build_default_info: self.build_default_info,
-                    build_run_info: self.build_run_info,
+                    build_default_info,
+                    build_run_info,
+                    ignore_default_test_filters: self.no_default_test_filters,
                 },
                 events_ctx,
                 ctx.console_interaction_stream(&self.common_opts.console_opts),

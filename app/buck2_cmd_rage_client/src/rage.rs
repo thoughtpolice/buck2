@@ -22,6 +22,7 @@ use buck2_client_ctx::thread_dump::thread_dump_command;
 use buck2_client_ctx::upload_re_logs::upload_re_logs;
 use buck2_common::argv::Argv;
 use buck2_common::argv::SanitizedArgv;
+use buck2_common::init::RageUploadMethod;
 use buck2_common::manifold::Bucket;
 use buck2_common::manifold::ManifoldClient;
 use buck2_data::InstantEvent;
@@ -36,6 +37,7 @@ use buck2_events::BuckEvent;
 use buck2_events::sink::remote::RemoteEventSink;
 use buck2_events::sink::remote::ScribeConfig;
 use buck2_events::sink::remote::new_remote_event_sink_if_enabled;
+use buck2_fs::async_fs_util;
 use buck2_fs::paths::abs_norm_path::AbsNormPath;
 use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
 use buck2_hash::StdBuckHashMap;
@@ -95,8 +97,6 @@ pub struct RageCommand {
 
 impl RageCommand {
     pub fn exec(self, _matches: BuckArgMatches<'_>, ctx: ClientCommandContext<'_>) -> ExitResult {
-        buck2_core::facebook_only();
-
         ctx.with_runtime(|ctx| async move {
             self.exec_impl(ctx).await?;
             ExitResult::success()
@@ -104,6 +104,13 @@ impl RageCommand {
     }
 
     async fn exec_impl(self, mut ctx: ClientCommandContext<'_>) -> buck2_error::Result<()> {
+        let rage_upload_method = ctx
+            .immediate_config
+            .daemon_startup_config()
+            .map(|c| c.rage_upload_method.clone())
+            .unwrap_or(RageUploadMethod::None);
+        let use_internal = matches!(rage_upload_method, RageUploadMethod::Internal);
+
         let paths = ctx.paths()?;
         let daemon_dir = paths.daemon_dir()?;
         let stderr_path = daemon_dir.buckd_stderr();
@@ -113,12 +120,19 @@ impl RageCommand {
 
         let client_ctx = ctx.empty_client_context("rage")?;
 
-        // Don't fail the rage if you can't figure out whether to do vpnless.
-        let manifold = ManifoldClient::new().await?;
+        let manifold = if use_internal {
+            Some(ManifoldClient::new().await?)
+        } else {
+            None
+        };
 
         let rage_id = TraceId::new();
         let mut manifold_id = format!("{rage_id}");
-        let sink = create_scribe_sink(&ctx)?;
+        let sink = if use_internal {
+            create_scribe_sink(&ctx)?
+        } else {
+            None
+        };
 
         buck2_client_ctx::eprintln!(
             "Data collection will terminate after {} seconds (override with --timeout param)",
@@ -143,7 +157,7 @@ impl RageCommand {
         buck2_client_ctx::eprintln!("Collecting debug info...")?;
 
         let thread_dump = self.section("Thread dump", || {
-            upload_thread_dump(&info, &manifold, &manifold_id)
+            upload_thread_dump(&info, manifold.as_ref(), &manifold_id)
         });
         let build_info_command = self.skippable_section(
             "Associated invocation info",
@@ -161,7 +175,7 @@ impl RageCommand {
 
         let system_info_command = self.section("System info", crate::system_info::get);
         let daemon_stderr_command = self.section("Daemon stderr", || {
-            upload_daemon_stderr(stderr_path, &manifold, &manifold_id)
+            upload_daemon_stderr(stderr_path, manifold.as_ref(), &manifold_id)
         });
         let hg_snapshot_id_command =
             self.section("Source control", crate::source_control::get_info);
@@ -169,7 +183,7 @@ impl RageCommand {
             crate::dice::upload_dice_dump(
                 buckd.clone().await?,
                 dice_dump_dir,
-                &manifold,
+                manifold.as_ref(),
                 &manifold_id,
             )
             .await
@@ -178,7 +192,7 @@ impl RageCommand {
             crate::materializer::upload_materializer_data(
                 buckd.clone(),
                 &client_ctx,
-                &manifold,
+                manifold.as_ref(),
                 &manifold_id,
                 MaterializerRageUploadData::State,
             )
@@ -187,23 +201,39 @@ impl RageCommand {
             crate::materializer::upload_materializer_data(
                 buckd.clone(),
                 &client_ctx,
-                &manifold,
+                manifold.as_ref(),
                 &manifold_id,
                 MaterializerRageUploadData::Fsck,
             )
         });
         let event_log_command = self.skippable_section(
             "Event log upload",
-            selected_invocation
-                .as_ref()
-                .map(|path| || upload_event_logs(path, &manifold, &manifold_id)),
+            if use_internal {
+                selected_invocation.as_ref().map(|path| {
+                    || {
+                        let m = manifold.as_ref().unwrap();
+                        upload_event_logs(path, m, &manifold_id)
+                    }
+                })
+            } else {
+                None
+            },
         );
 
         let re_logs_command = self.skippable_section(
             "RE logs upload",
-            build_info
-                .get_field(|o| o.re_session_id.clone())
-                .map(|id| || upload_re_logs_impl(&manifold, &re_logs_dir, id)),
+            if use_internal {
+                build_info
+                    .get_field(|o| o.re_session_id.clone())
+                    .map(|id| {
+                        || {
+                            let m = manifold.as_ref().unwrap();
+                            upload_re_logs_impl(m, &re_logs_dir, id)
+                        }
+                    })
+            } else {
+                None
+            },
         );
 
         let (
@@ -237,23 +267,35 @@ impl RageCommand {
             event_log_dump.to_string(),
             re_logs.to_string(),
         ];
-        output_rage(self.no_paste, &sections.join("")).await?;
+        let report = sections.join("");
 
-        self.send_to_scuba(
-            sink,
-            invocation_id,
-            system_info,
-            daemon_stderr_dump,
-            hg_snapshot_id,
-            dice_dump,
-            materializer_state,
-            materializer_fsck,
-            thread_dump,
-            event_log_dump,
-            build_info,
-            re_logs,
-        )
-        .await?;
+        match rage_upload_method {
+            RageUploadMethod::Internal => {
+                output_rage(self.no_paste, &report).await?;
+                self.send_to_scuba(
+                    sink,
+                    invocation_id,
+                    system_info,
+                    daemon_stderr_dump,
+                    hg_snapshot_id,
+                    dice_dump,
+                    materializer_state,
+                    materializer_fsck,
+                    thread_dump,
+                    event_log_dump,
+                    build_info,
+                    re_logs,
+                )
+                .await?;
+            }
+            RageUploadMethod::Command(ref cmd) if !self.no_paste => {
+                output_rage_via_command(cmd, &rage_id, invocation_id.as_ref(), &report).await?;
+            }
+            _ => {
+                buck2_client_ctx::println!("{}", report)?;
+            }
+        }
+
         Ok(())
     }
 
@@ -504,10 +546,18 @@ fn insert_if_some<D>(data: &mut StdBuckHashMap<String, D>, key: &str, value: Opt
 
 async fn upload_daemon_stderr(
     path: AbsNormPathBuf,
-    manifold: &ManifoldClient,
+    manifold: Option<&ManifoldClient>,
     manifold_id: &str,
 ) -> buck2_error::Result<String> {
-    file_to_manifold(manifold, &path, format!("flat/{manifold_id}.stderr")).await
+    if let Some(manifold) = manifold {
+        file_to_manifold(manifold, &path, format!("flat/{manifold_id}.stderr")).await
+    } else {
+        let content = async_fs_util::read_to_string_if_exists(&path).await?;
+        match content {
+            Some(s) => Ok(s),
+            None => Ok(format!("(file not found: {})", path)),
+        }
+    }
 }
 
 async fn upload_event_logs(
@@ -702,6 +752,70 @@ async fn output_rage(no_paste: bool, output: &str) -> buck2_error::Result<()> {
     Ok(())
 }
 
+async fn output_rage_via_command(
+    cmd: &str,
+    rage_id: &TraceId,
+    invocation_id: Option<&TraceId>,
+    report: &str,
+) -> buck2_error::Result<()> {
+    buck2_client_ctx::eprintln!("Rage trace id: {}", rage_id)?;
+
+    let expanded = cmd
+        .replace("$TRACE_ID", &rage_id.to_string())
+        .replace(
+            "$INVOCATION_ID",
+            &invocation_id
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
+        );
+
+    let mut child = async_background_command("sh")
+        .args(["-c", &expanded])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .buck_error_context("Failed to spawn rage upload command")?;
+
+    let mut stdin = child.stdin.take().expect("stdin was piped");
+
+    let report_bytes = report.as_bytes().to_vec();
+    let writer = async move {
+        stdin
+            .write_all(&report_bytes)
+            .await
+            .buck_error_context("Error writing to rage upload command")?;
+        drop(stdin);
+        buck2_error::Ok(())
+    };
+
+    let reader = async move {
+        let output = tokio::time::timeout(Duration::from_secs(120), child.wait_with_output())
+            .await
+            .buck_error_context("Rage upload command timed out")?
+            .buck_error_context("Error reading rage upload command output")?;
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr).to_string();
+            buck2_client_ctx::eprintln!(
+                "Rage upload command failed (exit {}): {}",
+                output.status.code().unwrap_or(-1),
+                error.trim()
+            )?;
+        } else {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stdout = stdout.trim();
+            if !stdout.is_empty() {
+                buck2_client_ctx::eprintln!("\n{}\n", stdout)?;
+            }
+        }
+        buck2_error::Ok(())
+    };
+
+    let ((), ()) = futures::future::try_join(writer, reader).await?;
+    Ok(())
+}
+
 async fn generate_paste(title: &str, content: &str) -> buck2_error::Result<String> {
     let mut pastry = async_background_command("pastry")
         .args(["--title", title])
@@ -745,7 +859,7 @@ async fn generate_paste(title: &str, content: &str) -> buck2_error::Result<Strin
 
 async fn upload_thread_dump(
     buckd: &buck2_error::Result<BuckdProcessInfo<'_>>,
-    manifold: &ManifoldClient,
+    manifold: Option<&ManifoldClient>,
     manifold_id: &String,
 ) -> buck2_error::Result<String> {
     let buckd = buckd.as_ref().map_err(|e| e.clone())?;
@@ -759,8 +873,12 @@ async fn upload_thread_dump(
         .await?;
 
     if command.status.success() {
-        let manifold_filename = format!("flat/{manifold_id}_thread_dump");
-        crate::manifold::buf_to_manifold(manifold, &command.stdout, manifold_filename).await
+        if let Some(manifold) = manifold {
+            let manifold_filename = format!("flat/{manifold_id}_thread_dump");
+            crate::manifold::buf_to_manifold(manifold, &command.stdout, manifold_filename).await
+        } else {
+            Ok(String::from_utf8_lossy(&command.stdout).to_string())
+        }
     } else {
         let stderr = &command.stderr;
         Ok(String::from_utf8_lossy(stderr).to_string())
