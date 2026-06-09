@@ -1,0 +1,39 @@
+load(":defs.bzl", "remote_asset")
+
+remote_asset(
+    name = "valid_file",
+    urls = [
+        "https://mirror-one.example/asset.tar.zst",
+        "https://mirror-two.example/asset.tar.zst",
+    ],
+    qualifiers = {
+        "resource_type": "application/zstd",
+        "checksum.sri": "sha256-dGVzdA==",
+    },
+)
+
+remote_asset(
+    name = "valid_directory",
+    as_single = True,
+    is_directory = True,
+    urls = ["https://example.com/repository.git"],
+    qualifiers = {
+        "vcs.commit": "0123456789abcdef0123456789abcdef01234567",
+        "resource_type": "application/x-git",
+        "directory": "src",
+    },
+)
+
+remote_asset(
+    name = "empty_urls",
+    urls = [],
+    qualifiers = {},
+)
+
+remote_asset(
+    name = "executable_directory",
+    is_directory = True,
+    is_executable = True,
+    urls = ["https://example.com/repository.git"],
+    qualifiers = {"vcs.branch": "main"},
+)
