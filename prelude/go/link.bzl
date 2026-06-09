@@ -68,6 +68,35 @@ def _build_mode_param(mode: GoBuildMode) -> str:
         return "c-archive"
     fail("unexpected: {}", mode)
 
+# GOOS/GOARCH pairs that internal/platform.InternalLinkPIESupported accepts in
+# every Go release from 1.22 to 1.27. Newer releases add pairs; leaving one out
+# only keeps the C++ linker wiring for it.
+_INTERNAL_LINK_PIE_SUPPORTED = [
+    "android/arm64",
+    "darwin/amd64",
+    "darwin/arm64",
+    "linux/amd64",
+    "linux/arm64",
+    "windows/386",
+    "windows/amd64",
+    "windows/arm64",
+]
+
+def _must_link_externally_without_cgo(go_os: str, go_arch: str, build_mode: GoBuildMode) -> bool:
+    """
+    Whether cmd/link defaults to an external link even without cgo. This
+    mirrors the non-cgo cases of internal/platform.MustLinkExternal and
+    cmd/link's PIE check. With cgo, the default can be external on any
+    platform.
+    """
+    if go_os == "android" and go_arch != "arm64":
+        return True
+    if go_os == "ios" and go_arch == "arm64":
+        return True
+    if build_mode == GoBuildMode("pie") and go_os + "/" + go_arch not in _INTERNAL_LINK_PIE_SUPPORTED:
+        return True
+    return False
+
 def get_inherited_link_pkgs(deps: list[Dependency]) -> dict[str, GoPkg]:
     return merge_pkgs([d[GoPkgLinkInfo].pkgs for d in deps if GoPkgLinkInfo in d])
 
@@ -190,8 +219,16 @@ def link(
     if link_mode != None:
         cmd.add("-linkmode", link_mode)
 
+    # The C++ linker only matters when cmd/link links externally. Wiring it into
+    # internal links too makes them depend on the C++ link flags, so changing
+    # those re-runs every cgo-free Go link for byte-identical outputs.
+    if link_mode == None:
+        may_link_externally = cgo_enabled or _must_link_externally_without_cgo(go_toolchain.env_go_os, go_toolchain.env_go_arch, build_mode)
+    else:
+        may_link_externally = link_mode == "external"
+
     cxx_toolchain_available = CxxToolchainInfo in ctx.attrs._cxx_toolchain
-    if cxx_toolchain_available:
+    if may_link_externally and cxx_toolchain_available:
         cxx_toolchain = ctx.attrs._cxx_toolchain[CxxToolchainInfo]
         is_win = ctx.attrs._exec_os_type[OsLookup].os == Os("windows")
 
