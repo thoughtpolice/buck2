@@ -500,6 +500,7 @@ impl<'a> ServerCommandContext<'a> {
             defer_write_actions: false,
             write_action_cache: WriteActionCacheMode::Off,
             write_action_cache_populate: RolloutFraction::none(),
+            upload_downloads_to_cas: false,
         };
 
         let concurrency = self
@@ -960,13 +961,21 @@ impl DiceCommandUpdater<'_, '_> {
             .or_else(|| parse_concurrency(config_threads))
             .unwrap_or_else(buck2_util::threads::available_parallelism_fresh);
 
-        if let Some(max_lines) = root_config.parse(BuckconfigKeyRef {
+        let max_lines = root_config.parse::<u64>(BuckconfigKeyRef {
             section: "ui",
             property: "thread_line_limit",
-        })? {
+        })?;
+        let slim_test_output = root_config.parse::<bool>(BuckconfigKeyRef {
+            section: "ui",
+            property: "slim_test_output",
+        })?;
+        if max_lines.is_some() || slim_test_output.is_some() {
             self.cmd_ctx
                 .events()
-                .instant_event(buck2_data::ConsolePreferences { max_lines });
+                .instant_event(buck2_data::ConsolePreferences {
+                    max_lines,
+                    slim_test_output,
+                });
         }
 
         let enable_miniperf = root_config
@@ -1099,6 +1108,14 @@ impl DiceCommandUpdater<'_, '_> {
                 property: "write_action_cache_populate",
             })?
             .unwrap_or_else(RolloutFraction::none);
+
+        run_action_knobs.upload_downloads_to_cas = root_config
+            .parse::<bool>(BuckconfigKeyRef {
+                section: "buck2",
+                property: "upload_downloads_to_cas",
+            })?
+            .unwrap_or(false)
+            && !self.skip_cache_write;
 
         let output_trees_download_semaphore_size = root_config.parse::<u32>(BuckconfigKeyRef {
             section: "buck2",

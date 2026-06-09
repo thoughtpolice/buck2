@@ -38,6 +38,8 @@ use buck2_client_ctx::subscribers::superconsole::test::span_from_build_failure_c
 use buck2_error::BuckErrorContext;
 use buck2_error::BuckErrorOptionContext;
 use buck2_error::ExitCode;
+use buck2_event_observer::verbosity::Verbosity;
+use buck2_event_observer::verbosity::VerbosityItem;
 use buck2_fs::error::IoResultExt;
 use buck2_fs::fs_util;
 use buck2_fs::working_dir::AbsWorkingDir;
@@ -133,6 +135,13 @@ If any include pattern without a `!` prefix is present, regardless of whether ex
     )]
     build_filtered_targets: bool, // TODO(bobyf) this flag should always override the buckconfig option when we use it
 
+    #[clap(
+        long = "no-default-test-filters",
+        alias = "no_default_test_filters",
+        help = "Ignore the `[test] default_exclude_labels` / `default_include_labels` buckconfig defaults, applying only the `--exclude` / `--include` filters passed on the command line."
+    )]
+    no_default_test_filters: bool,
+
     /// Will allow tests that are compatible with RE (setup to run from the repo root and
     /// use relative paths) to run from RE.
     #[clap(long, group = "re_options", alias = "unstable-allow-tests-on-re")]
@@ -205,6 +214,13 @@ If any include pattern without a `!` prefix is present, regardless of whether ex
     /// This overrides the `buck2.test_builds_targets` buckconfig.
     #[clap(long, group = "run-info")]
     skip_run_info: bool,
+
+    /// Show stdout/stderr output for passing tests.
+    ///
+    /// By default, passing tests only show a summary line. This flag
+    /// causes their full stdout/stderr to be displayed.
+    #[clap(long)]
+    print_passing_details: bool,
 
     /// This option does nothing. It is here to keep compatibility with Buck1 and ci
     #[clap(long = "deep", hide = true)]
@@ -436,6 +452,7 @@ impl StreamingCommand for TestCommand {
                     ignore_tests_attribute: self.ignore_tests_attribute,
                     build_default_info,
                     build_run_info,
+                    ignore_default_test_filters: self.no_default_test_filters,
                 },
                 events_ctx,
                 ctx.console_interaction_stream(&self.common_opts.console_opts),
@@ -584,6 +601,13 @@ impl StreamingCommand for TestCommand {
             }
             _ => exit_result,
         }
+    }
+
+    fn adjust_verbosity(&self, mut verbosity: Verbosity) -> Verbosity {
+        if self.print_passing_details {
+            verbosity.add_item(VerbosityItem::TestPassingDetails);
+        }
+        verbosity
     }
 
     fn console_opts(&self) -> &CommonConsoleOptions {
