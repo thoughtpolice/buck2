@@ -19,6 +19,7 @@ use buck2_common::argv::ArgFileKind;
 use buck2_common::argv::ArgFilePath;
 use buck2_common::argv::ExpandedArgv;
 use buck2_common::argv::ExpandedArgvBuilder;
+use buck2_core::buck2_env;
 use buck2_core::is_open_source;
 use buck2_error::BuckErrorContext;
 use buck2_fs::error::IoResultExt;
@@ -48,16 +49,18 @@ enum ArgExpansionError {
         source: buck2_error::Error,
         path: String,
     },
-    #[error("Python mode file `{path}` output is not UTF-8")]
-    PythonOutputNotUtf8 { path: String },
+    #[error("Output of argfile `{path}` is not UTF-8")]
+    ArgfileOutputNotUtf8 { path: String },
     #[error("Flag file `{path}` includes itself")]
     CyclicInclusion { path: String },
     #[error("No flag file path after @ symbol in argfile argument")]
     MissingFlagFilePathInArgfile,
-    #[error("Python argfile at `{path}` exited with non-zero status, stderr: {err:?}")]
-    PythonExecutableFailed { path: String, err: String },
-    #[error("Python argfile command ({cmd:?}) execution failed")]
-    PythonExecutionFailed { source: io::Error, cmd: Command },
+    #[error("Argfile `{path}` exited with non-zero status, stderr: {err:?}")]
+    ArgfileCommandFailed { path: String, err: String },
+    #[error("Argfile command ({cmd:?}) execution failed")]
+    ArgfileExecutionFailed { source: io::Error, cmd: Command },
+    #[error("Argfile `{path}` starts with `#!` but is not executable. Use `chmod +x` to run it")]
+    ShebangNotExecutable { path: String },
     #[error("Unable to read line from stdin")]
     StdinReadError { source: buck2_error::Error },
 }
@@ -198,11 +201,18 @@ fn expand_argfile_contents(
                 }
             })?;
             let reader = io::BufReader::new(file);
-            for line_result in reader.lines() {
+            for (i, line_result) in reader.lines().enumerate() {
                 let line = line_result.map_err(|source| ArgExpansionError::FlagFileReadError {
                     source: source.into(),
                     path: path.to_string(),
                 })?;
+                // Executable argfiles are unix-only, so the hint would not help elsewhere.
+                if cfg!(unix) && i == 0 && line.starts_with("#!") {
+                    return Err(ArgExpansionError::ShebangNotExecutable {
+                        path: path.to_string(),
+                    }
+                    .into());
+                }
                 if line.is_empty() {
                     continue;
                 }
@@ -211,35 +221,18 @@ fn expand_argfile_contents(
             Ok(lines)
         }
         ArgFileKind::PythonExecutable(path, flag) => {
-            let mut cmd = background_command(if is_open_source() {
+            let python = buck2_env!("BUCK2_ARGFILE_PYTHON")?.unwrap_or(if is_open_source() {
                 "python3"
             } else {
                 "fbpython"
             });
-            cmd.env("BUCK2_ARG_FILE", "1");
+            let mut cmd = background_command(python);
             cmd.arg(argfile_abs_path(context, path)?.as_os_str());
-            if let Some(flag) = flag.as_deref() {
-                cmd.args(["--flavors", flag]);
-            }
-            let cmd_out = cmd
-                .output()
-                .map_err(|source| ArgExpansionError::PythonExecutionFailed { cmd, source })?;
-            if cmd_out.status.success() {
-                Ok(str::from_utf8(&cmd_out.stdout)
-                    .map_err(|_| ArgExpansionError::PythonOutputNotUtf8 {
-                        path: path.to_string(),
-                    })?
-                    .lines()
-                    .filter(|line| !line.is_empty())
-                    .map(|s| s.to_owned())
-                    .collect::<Vec<String>>())
-            } else {
-                Err(ArgExpansionError::PythonExecutableFailed {
-                    path: path.to_string(),
-                    err: String::from_utf8_lossy(&cmd_out.stderr).to_string(),
-                }
-                .into())
-            }
+            run_argfile_command(cmd, path, flag.as_deref())
+        }
+        ArgFileKind::Executable(path, flag) => {
+            let cmd = background_command(argfile_abs_path(context, path)?.as_os_str());
+            run_argfile_command(cmd, path, flag.as_deref())
         }
         ArgFileKind::Stdin => io::stdin()
             .lock()
@@ -253,6 +246,38 @@ fn expand_argfile_contents(
                 .into())),
             })
             .collect(),
+    }
+}
+
+// Runs an argfile program and returns the non-empty lines of its stdout. A flavor from
+// `@path#flavor` becomes the arguments `--flavors <flavor>`.
+fn run_argfile_command(
+    mut cmd: Command,
+    path: &ArgFilePath,
+    flag: Option<&str>,
+) -> buck2_error::Result<Vec<String>> {
+    cmd.env("BUCK2_ARG_FILE", "1");
+    if let Some(flag) = flag {
+        cmd.args(["--flavors", flag]);
+    }
+    let cmd_out = cmd
+        .output()
+        .map_err(|source| ArgExpansionError::ArgfileExecutionFailed { cmd, source })?;
+    if cmd_out.status.success() {
+        Ok(str::from_utf8(&cmd_out.stdout)
+            .map_err(|_| ArgExpansionError::ArgfileOutputNotUtf8 {
+                path: path.to_string(),
+            })?
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|s| s.to_owned())
+            .collect::<Vec<String>>())
+    } else {
+        Err(ArgExpansionError::ArgfileCommandFailed {
+            path: path.to_string(),
+            err: String::from_utf8_lossy(&cmd_out.stderr).to_string(),
+        }
+        .into())
     }
 }
 
@@ -383,6 +408,21 @@ mod tests {
             "{kind:?}"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_resolve_absolute_flagfile_with_flavor() -> buck2_error::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let root = AbsPathBuf::new(tempdir.path().canonicalize()?)?;
+        fs_util::write(root.join(".buckconfig"), "[cells]\nroot = .")?;
+        let mode_file = root.join("mode.py");
+        fs_util::write(&mode_file, "")?;
+
+        let cwd = AbsWorkingDir::unchecked_new(AbsNormPathBuf::new(root.to_path_buf())?);
+        let mut context = ImmediateConfigContext::new(&cwd);
+        let kind = resolve_flagfile(&format!("{mode_file}#opt"), &mut context, &cwd)?;
+        assert_eq!(kind.to_string(), "@root//mode.py#opt");
         Ok(())
     }
 
@@ -591,5 +631,107 @@ mod tests {
         )
         .unwrap();
         assert_eq!(argv.args().collect::<Vec<_>>(), vec!["--c", "--c"]);
+    }
+
+    #[cfg(unix)]
+    fn write_with_mode(path: &AbsPath, contents: &str, mode: u32) -> buck2_error::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs_util::write(path, contents)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_argfile_kind_executable() -> buck2_error::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let root = AbsPathBuf::new(tempdir.path().canonicalize()?)?;
+        fs_util::write(root.join(".buckconfig"), "[cells]\nroot = .")?;
+        write_with_mode(&root.join("script"), "#!/bin/sh\n", 0o755)?;
+        write_with_mode(&root.join("script.py"), "#!/usr/bin/env python3\n", 0o755)?;
+        // Not executable, so it runs with the Python interpreter despite the shebang.
+        write_with_mode(&root.join("plain.py"), "#!/usr/bin/env python3\n", 0o644)?;
+        // Executable but without a shebang, like every file on some filesystems.
+        write_with_mode(&root.join("plain"), "--magic\n", 0o755)?;
+
+        let cwd = AbsWorkingDir::unchecked_new(AbsNormPathBuf::new(root.to_path_buf())?);
+        let context = ImmediateConfigContext::new(&cwd);
+        let kind = |name: &str| {
+            context
+                .resolve_argfile_kind(AbsNormPathBuf::new(root.join(name).into_path_buf())?, None)
+        };
+
+        let script = kind("script")?;
+        assert!(matches!(script, ArgFileKind::Executable(..)), "{script:?}");
+        let script_py = kind("script.py")?;
+        assert!(
+            matches!(script_py, ArgFileKind::Executable(..)),
+            "{script_py:?}"
+        );
+        let plain_py = kind("plain.py")?;
+        assert!(
+            matches!(plain_py, ArgFileKind::PythonExecutable(..)),
+            "{plain_py:?}"
+        );
+        let plain = kind("plain")?;
+        assert!(matches!(plain, ArgFileKind::Path(..)), "{plain:?}");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_executable_argfile() -> buck2_error::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let root = AbsPathBuf::new(tempdir.path().canonicalize()?)?;
+        fs_util::write(root.join(".buckconfig"), "[cells]\nroot = .")?;
+        // Echo the environment variable and the arguments buck2 passes.
+        write_with_mode(
+            &root.join("gen"),
+            "#!/bin/sh\necho \"$BUCK2_ARG_FILE\"\nprintf '%s\\n' \"$@\"\n",
+            0o755,
+        )?;
+
+        let cwd = AbsWorkingDir::unchecked_new(AbsNormPathBuf::new(root.to_path_buf())?);
+        let mut context = ImmediateConfigContext::new(&cwd);
+        let mut args = ExpandedArgvBuilder::new();
+        expand_argfiles_with_context(&mut args, vec!["@gen#opt".to_owned()], &mut context, &cwd)?;
+        let args = args.build();
+
+        assert_eq!(
+            args.args().collect::<Vec<_>>(),
+            vec!["1", "--flavors", "opt"]
+        );
+        for (_, source) in args.iter() {
+            match source {
+                ExpandedArgSource::Flagfile(flagfile) => {
+                    assert_eq!(flagfile.kind.to_string(), "@root//gen#opt")
+                }
+                ExpandedArgSource::Inline => panic!("expected args from the argfile"),
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_shebang_argfile_not_executable() -> buck2_error::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let root = AbsPathBuf::new(tempdir.path().canonicalize()?)?;
+        fs_util::write(root.join(".buckconfig"), "[cells]\nroot = .")?;
+        write_with_mode(&root.join("gen"), "#!/bin/sh\necho --magic\n", 0o644)?;
+
+        let cwd = AbsWorkingDir::unchecked_new(AbsNormPathBuf::new(root.to_path_buf())?);
+        let mut context = ImmediateConfigContext::new(&cwd);
+        let err = expand_argfiles_with_context(
+            &mut ExpandedArgvBuilder::new(),
+            vec!["@gen".to_owned()],
+            &mut context,
+            &cwd,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("is not executable"), "{err:?}");
+        Ok(())
     }
 }
