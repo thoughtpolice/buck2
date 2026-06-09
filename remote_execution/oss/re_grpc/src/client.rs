@@ -39,6 +39,10 @@ use futures::stream::TryStreamExt;
 use gazebo::prelude::*;
 use lru::LruCache;
 use prost::Message;
+use re_grpc_proto::build::bazel::remote::asset::v1::FetchBlobRequest;
+use re_grpc_proto::build::bazel::remote::asset::v1::FetchDirectoryRequest;
+use re_grpc_proto::build::bazel::remote::asset::v1::Qualifier;
+use re_grpc_proto::build::bazel::remote::asset::v1::fetch_client::FetchClient;
 use re_grpc_proto::build::bazel::remote::execution::v2::ActionResult;
 use re_grpc_proto::build::bazel::remote::execution::v2::BatchReadBlobsRequest;
 use re_grpc_proto::build::bazel::remote::execution::v2::BatchReadBlobsResponse;
@@ -156,6 +160,14 @@ fn ttimestamp_from(ts: Option<::prost_types::Timestamp>) -> TTimestamp {
     }
 }
 
+fn ttimestamp_from_value(timestamp: ::prost_types::Timestamp) -> TTimestamp {
+    TTimestamp {
+        seconds: timestamp.seconds,
+        nanos: timestamp.nanos,
+        ..Default::default()
+    }
+}
+
 /// Contains information queried from the Remote Execution Capabilities service.
 pub struct RECapabilities {
     /// Largest size of a message before being uploaded using bytestream service.
@@ -228,7 +240,10 @@ impl Compressor {
 pub struct REClientBuilder;
 
 impl REClientBuilder {
-    pub async fn build_and_connect(opts: &Buck2OssReConfiguration) -> anyhow::Result<REClient> {
+    pub async fn build_and_connect(
+        opts: &Buck2OssReConfiguration,
+        digest_function: i32,
+    ) -> anyhow::Result<REClient> {
         // Create channel config once (reads TLS files)
         let channel_config = ChannelConfig::new(opts)
             .await
@@ -257,6 +272,7 @@ impl REClientBuilder {
                 &mut capabilities_client,
                 &instance_name,
                 opts.max_total_batch_size,
+                digest_function,
             )
             .await?
         } else {
@@ -331,6 +347,7 @@ impl REClientBuilder {
             cas_address,
             engine_address.clone(),
             action_cache_address,
+            digest_function,
         ))
     }
 
@@ -338,9 +355,8 @@ impl REClientBuilder {
         client: &mut CapabilitiesClient<InterceptedService<Channel, InjectHeadersInterceptor>>,
         instance_name: &InstanceName,
         max_total_batch_size: Option<usize>,
+        digest_function: i32,
     ) -> anyhow::Result<RECapabilities> {
-        // TODO use more of the capabilities of the remote build executor
-
         let resp = client
             .get_capabilities(GetCapabilitiesRequest {
                 instance_name: instance_name.as_str().to_owned(),
@@ -350,6 +366,18 @@ impl REClientBuilder {
             .into_inner();
 
         let supported_compressors = if let Some(cache_cap) = &resp.cache_capabilities {
+            // Validate that the server supports our configured digest function.
+            if !cache_cap.digest_functions.is_empty()
+                && !cache_cap.digest_functions.contains(&digest_function)
+            {
+                return Err(anyhow::anyhow!(
+                    "Remote execution server does not support digest function {} \
+                     (server supports: {:?})",
+                    digest_function,
+                    cache_cap.digest_functions
+                ));
+            }
+
             cache_cap
                 .supported_compressors
                 .iter()
@@ -477,6 +505,20 @@ pub struct REClient {
     cas_address: String,
     engine_address: String,
     action_cache_address: String,
+    /// Proto `DigestFunction.Value` as `i32` (e.g. 1=SHA256, 2=SHA1, 9=BLAKE3).
+    digest_function: i32,
+    /// Resource name component for bytestream paths, e.g. `Some("blake3")` or `None`.
+    digest_function_resource_name: Option<String>,
+}
+
+/// Map a proto `DigestFunction.Value` to the resource name component that must
+/// appear in ByteStream paths, or `None` when the spec says to omit it.
+fn digest_function_to_resource_name(digest_function: i32) -> Option<String> {
+    match digest_function {
+        9 => Some("blake3".to_owned()),
+        8 => Some("sha256tree".to_owned()),
+        _ => None,
+    }
 }
 
 impl Drop for REClient {
@@ -628,7 +670,9 @@ impl REClient {
         cas_address: String,
         engine_address: String,
         action_cache_address: String,
+        digest_function: i32,
     ) -> Self {
+        let digest_function_resource_name = digest_function_to_resource_name(digest_function);
         REClient {
             runtime_opts,
             pool,
@@ -645,6 +689,8 @@ impl REClient {
             cas_address,
             engine_address,
             action_cache_address,
+            digest_function,
+            digest_function_resource_name,
         }
     }
 
@@ -661,6 +707,7 @@ impl REClient {
                     GetActionResultRequest {
                         instance_name: self.instance_name.as_str().to_owned(),
                         action_digest: Some(tdigest_to(request.digest.clone())),
+                        digest_function: self.digest_function,
                         ..Default::default()
                     },
                     metadata.clone(),
@@ -693,6 +740,7 @@ impl REClient {
                         action_digest: Some(tdigest_to(request.action_digest.clone())),
                         action_result: Some(action_result.clone()),
                         results_cache_policy: None,
+                        digest_function: self.digest_function,
                         ..Default::default()
                     },
                     metadata.clone(),
@@ -704,6 +752,91 @@ impl REClient {
                 actual_action_result: convert_action_result(res.into_inner())?,
                 ttl_seconds: 0,
             })
+        })
+        .await
+    }
+
+    pub async fn fetch_remote_asset(
+        &self,
+        metadata: RemoteExecutionMetadata,
+        request: RemoteAssetRequest,
+    ) -> anyhow::Result<RemoteAssetResponse> {
+        let qualifiers = request
+            .qualifiers
+            .iter()
+            .map(|qualifier| Qualifier {
+                name: qualifier.name.clone(),
+                value: qualifier.value.clone(),
+            })
+            .collect::<Vec<_>>();
+        let timeout = request
+            .timeout_seconds
+            .map(|seconds| prost_types::Duration {
+                seconds: seconds.try_into().unwrap_or(i64::MAX),
+                nanos: 0,
+            });
+
+        retry(|| async {
+            match request.kind {
+                RemoteAssetKind::Blob => {
+                    let response = self
+                        .remote_asset_client()
+                        .await?
+                        .fetch_blob(with_re_metadata(
+                            FetchBlobRequest {
+                                instance_name: self.instance_name.as_str().to_owned(),
+                                timeout,
+                                oldest_content_accepted: None,
+                                uris: request.uris.clone(),
+                                qualifiers: qualifiers.clone(),
+                                digest_function: request.digest_function,
+                            },
+                            metadata.clone(),
+                            self.runtime_opts.use_fbcode_metadata,
+                        ))
+                        .await?
+                        .into_inner();
+
+                    check_status(response.status.unwrap_or_default())?;
+                    let digest = response
+                        .blob_digest
+                        .context("Remote Asset FetchBlob response did not contain a digest")?;
+                    Ok(RemoteAssetResponse {
+                        digest: tdigest_from(digest),
+                        expires_at: response.expires_at.map(ttimestamp_from_value),
+                        digest_function: response.digest_function,
+                    })
+                }
+                RemoteAssetKind::Directory => {
+                    let response = self
+                        .remote_asset_client()
+                        .await?
+                        .fetch_directory(with_re_metadata(
+                            FetchDirectoryRequest {
+                                instance_name: self.instance_name.as_str().to_owned(),
+                                timeout,
+                                oldest_content_accepted: None,
+                                uris: request.uris.clone(),
+                                qualifiers: qualifiers.clone(),
+                                digest_function: request.digest_function,
+                            },
+                            metadata.clone(),
+                            self.runtime_opts.use_fbcode_metadata,
+                        ))
+                        .await?
+                        .into_inner();
+
+                    check_status(response.status.unwrap_or_default())?;
+                    let digest = response.root_directory_digest.context(
+                        "Remote Asset FetchDirectory response did not contain a root directory digest",
+                    )?;
+                    Ok(RemoteAssetResponse {
+                        digest: tdigest_from(digest),
+                        expires_at: response.expires_at.map(ttimestamp_from_value),
+                        digest_function: response.digest_function,
+                    })
+                }
+            }
         })
         .await
     }
@@ -733,6 +866,7 @@ impl REClient {
                         execution_policy: Some(ExecutionPolicy { priority }),
                         results_cache_policy: Some(ResultsCachePolicy { priority: 0 }),
                         action_digest: Some(action_digest.clone()),
+                        digest_function: self.digest_function,
                         ..Default::default()
                     },
                     metadata.clone(),
@@ -849,6 +983,8 @@ impl REClient {
             self.bystream_compressor,
             self.capabilities.max_total_batch_size,
             self.runtime_opts.max_concurrent_uploads_per_action,
+            self.digest_function,
+            self.digest_function_resource_name.as_deref(),
             |re_request| {
                 let metadata = metadata.clone();
                 async move {
@@ -918,6 +1054,8 @@ impl REClient {
             request,
             self.bystream_compressor,
             self.capabilities.max_total_batch_size,
+            self.digest_function,
+            self.digest_function_resource_name.as_deref(),
             |re_request| {
                 let metadata = metadata.clone();
                 async move {
@@ -993,6 +1131,7 @@ impl REClient {
                             FindMissingBlobsRequest {
                                 instance_name: self.instance_name.as_str().to_owned(),
                                 blob_digests: blob_digests.clone(),
+                                digest_function: self.digest_function,
                                 ..Default::default()
                             },
                             metadata.clone(),
@@ -1089,6 +1228,14 @@ impl REClient {
     async fn action_cache_client(&self) -> anyhow::Result<ActionCacheClient<GrpcService>> {
         let channel = self.pool.get(&self.action_cache_address).await?;
         Ok(ActionCacheClient::new(InterceptedService::new(
+            channel,
+            self.interceptor.dupe(),
+        )))
+    }
+
+    async fn remote_asset_client(&self) -> anyhow::Result<FetchClient<GrpcService>> {
+        let channel = self.pool.get(&self.cas_address).await?;
+        Ok(FetchClient::new(InterceptedService::new(
             channel,
             self.interceptor.dupe(),
         )))
@@ -1292,6 +1439,8 @@ async fn download_impl<Byt, BytRet, Cas>(
     request: DownloadRequest,
     bystream_compressor: Option<Compressor>,
     max_total_batch_size: usize,
+    digest_function: i32,
+    digest_fn_name: Option<&str>,
     cas_f: impl Fn(BatchReadBlobsRequest) -> Cas,
     bystream_fut: impl Fn(ReadRequest) -> Byt + Sync + Send + Copy,
 ) -> anyhow::Result<DownloadResponse>
@@ -1304,19 +1453,25 @@ where
         instance_name: &InstanceName,
         compressor: Option<Compressor>,
         digest: &TDigest,
+        digest_fn_name: Option<&str>,
     ) -> String {
+        let df = digest_fn_name
+            .map(|n| format!("{n}/"))
+            .unwrap_or_default();
         if let Some(compressor) = compressor {
             format!(
-                "{}compressed-blobs/{}/{}/{}",
+                "{}compressed-blobs/{}/{}{}/{}",
                 instance_name.as_resource_prefix(),
                 compressor.name(),
+                df,
                 digest.hash,
                 digest.size_in_bytes,
             )
         } else {
             format!(
-                "{}blobs/{}/{}",
+                "{}blobs/{}{}/{}",
                 instance_name.as_resource_prefix(),
+                df,
                 digest.hash,
                 digest.size_in_bytes,
             )
@@ -1324,7 +1479,7 @@ where
     }
 
     let bystream_fut = |digest: TDigest| async move {
-        let resource_name = resource_name(instance_name, bystream_compressor, &digest);
+        let resource_name = resource_name(instance_name, bystream_compressor, &digest, digest_fn_name);
 
         bystream_fut(ReadRequest {
             resource_name: resource_name.clone(),
@@ -1385,6 +1540,7 @@ where
                 instance_name: instance_name.as_str().to_owned(),
                 digests: std::mem::take(&mut curr_digests),
                 acceptable_compressors: vec![compressor::Value::Identity as i32],
+                digest_function,
                 ..Default::default()
             };
             requests.push(read_blob_req);
@@ -1398,6 +1554,7 @@ where
             instance_name: instance_name.as_str().to_owned(),
             digests: std::mem::take(&mut curr_digests),
             acceptable_compressors: vec![compressor::Value::Identity as i32],
+            digest_function,
             ..Default::default()
         };
         requests.push(read_blob_req);
@@ -1510,6 +1667,8 @@ async fn upload_impl<Byt, Cas>(
     bystream_compressor: Option<Compressor>,
     max_total_batch_size: usize,
     max_concurrent_uploads: Option<usize>,
+    digest_function: i32,
+    digest_fn_name: Option<&str>,
     cas_f: impl Fn(BatchUpdateBlobsRequest) -> Cas + Sync + Send + Copy,
     bystream_fut: impl Fn(Vec<WriteRequest>) -> Byt + Sync + Send + Copy,
 ) -> anyhow::Result<UploadResponse>
@@ -1522,21 +1681,27 @@ where
         client_uuid: &str,
         compressor: Option<Compressor>,
         digest: &TDigest,
+        digest_fn_name: Option<&str>,
     ) -> String {
+        let df = digest_fn_name
+            .map(|n| format!("{n}/"))
+            .unwrap_or_default();
         if let Some(compressor) = compressor {
             format!(
-                "{}uploads/{}/compressed-blobs/{}/{}/{}",
+                "{}uploads/{}/compressed-blobs/{}/{}{}/{}",
                 instance_name.as_resource_prefix(),
                 client_uuid,
                 compressor.name(),
+                df,
                 digest.hash,
                 digest.size_in_bytes,
             )
         } else {
             format!(
-                "{}uploads/{}/blobs/{}/{}",
+                "{}uploads/{}/blobs/{}{}/{}",
                 instance_name.as_resource_prefix(),
                 client_uuid,
+                df,
                 digest.hash,
                 digest.size_in_bytes,
             )
@@ -1611,6 +1776,7 @@ where
             &client_uuid,
             bystream_compressor,
             &blob.digest,
+            digest_fn_name,
         );
         let fut = async move {
             retry(|| async {
@@ -1637,6 +1803,7 @@ where
             &client_uuid,
             bystream_compressor,
             &file.digest,
+            digest_fn_name,
         );
 
         let fut = async move {
@@ -1661,6 +1828,7 @@ where
             let mut re_request = BatchUpdateBlobsRequest {
                 instance_name: instance_name.as_str().to_owned(),
                 requests: vec![],
+                digest_function,
                 ..Default::default()
             };
             for blob in batch {
@@ -1850,10 +2018,207 @@ mod tests {
     use core::sync::atomic::Ordering;
     use std::sync::atomic::AtomicU16;
 
+    use buck2_re_configuration::Buck2OssReConfiguration;
+    use re_grpc_proto::build::bazel::remote::asset::v1::FetchBlobResponse;
+    use re_grpc_proto::build::bazel::remote::asset::v1::FetchDirectoryResponse;
+    use re_grpc_proto::build::bazel::remote::asset::v1::fetch_server;
+    use re_grpc_proto::build::bazel::remote::asset::v1::fetch_server::FetchServer;
     use re_grpc_proto::build::bazel::remote::execution::v2::batch_read_blobs_response;
     use re_grpc_proto::build::bazel::remote::execution::v2::batch_update_blobs_response;
+    use tonic::transport::Server;
 
     use super::*;
+
+    #[derive(Default)]
+    struct TestRemoteAssetService;
+
+    fn ok_status() -> Status {
+        Status {
+            code: Code::Ok as i32,
+            ..Default::default()
+        }
+    }
+
+    #[tonic::async_trait]
+    impl fetch_server::Fetch for TestRemoteAssetService {
+        async fn fetch_blob(
+            &self,
+            request: tonic::Request<FetchBlobRequest>,
+        ) -> Result<tonic::Response<FetchBlobResponse>, tonic::Status> {
+            let request = request.into_inner();
+            if request.instance_name != "test-instance"
+                || request.digest_function != 1
+                || request.timeout.as_ref().map(|timeout| timeout.seconds) != Some(7)
+                || request.qualifiers
+                    != vec![Qualifier {
+                        name: "checksum.sri".to_owned(),
+                        value: "sha256-test".to_owned(),
+                    }]
+            {
+                return Err(tonic::Status::invalid_argument(
+                    "unexpected FetchBlob request",
+                ));
+            }
+
+            match request.uris.first().map(String::as_str) {
+                Some("inline-error") => Ok(tonic::Response::new(FetchBlobResponse {
+                    status: Some(Status {
+                        code: Code::InvalidArgument as i32,
+                        message: "bad asset".to_owned(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })),
+                Some("missing-digest") => Ok(tonic::Response::new(FetchBlobResponse {
+                    status: Some(ok_status()),
+                    digest_function: 1,
+                    ..Default::default()
+                })),
+                _ => Ok(tonic::Response::new(FetchBlobResponse {
+                    status: Some(ok_status()),
+                    uri: request.uris[0].clone(),
+                    expires_at: Some(prost_types::Timestamp {
+                        seconds: 123,
+                        nanos: 456,
+                    }),
+                    blob_digest: Some(Digest {
+                        hash: "a".repeat(64),
+                        size_bytes: 42,
+                    }),
+                    digest_function: 1,
+                    ..Default::default()
+                })),
+            }
+        }
+
+        async fn fetch_directory(
+            &self,
+            request: tonic::Request<FetchDirectoryRequest>,
+        ) -> Result<tonic::Response<FetchDirectoryResponse>, tonic::Status> {
+            let request = request.into_inner();
+            if request.instance_name != "test-instance"
+                || request.uris != ["https://example.com/repo.git"]
+                || request.digest_function != 9
+            {
+                return Err(tonic::Status::invalid_argument(
+                    "unexpected FetchDirectory request",
+                ));
+            }
+            Ok(tonic::Response::new(FetchDirectoryResponse {
+                status: Some(ok_status()),
+                uri: request.uris[0].clone(),
+                root_directory_digest: Some(Digest {
+                    hash: "b".repeat(64),
+                    size_bytes: 84,
+                }),
+                digest_function: 9,
+                ..Default::default()
+            }))
+        }
+    }
+
+    async fn remote_asset_test_client() -> anyhow::Result<(REClient, tokio::task::JoinHandle<()>)> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?.to_string();
+        let incoming = futures::stream::unfold(listener, |listener| async move {
+            let item = listener.accept().await.map(|(stream, _)| stream);
+            Some((item, listener))
+        });
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_service(FetchServer::new(TestRemoteAssetService))
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        let client = REClientBuilder::build_and_connect(&Buck2OssReConfiguration {
+            cas_address: Some(address.clone()),
+            engine_address: Some(address.clone()),
+            action_cache_address: Some(address),
+            tls: false,
+            capabilities: Some(false),
+            instance_name: Some("test-instance".to_owned()),
+            ..Default::default()
+        })
+        .await?;
+        Ok((client, server))
+    }
+
+    fn blob_asset_request(uri: &str) -> RemoteAssetRequest {
+        RemoteAssetRequest {
+            kind: RemoteAssetKind::Blob,
+            uris: vec![uri.to_owned()],
+            qualifiers: vec![RemoteAssetQualifier {
+                name: "checksum.sri".to_owned(),
+                value: "sha256-test".to_owned(),
+            }],
+            digest_function: 1,
+            timeout_seconds: Some(7),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_remote_asset_fetch() -> anyhow::Result<()> {
+        let (client, server) = remote_asset_test_client().await?;
+
+        let blob = client
+            .fetch_remote_asset(
+                RemoteExecutionMetadata::default(),
+                blob_asset_request("blob"),
+            )
+            .await?;
+        assert_eq!(blob.digest.hash, "a".repeat(64));
+        assert_eq!(blob.digest.size_in_bytes, 42);
+        assert_eq!(blob.digest_function, 1);
+        assert_eq!(blob.expires_at.unwrap().seconds, 123);
+
+        let directory = client
+            .fetch_remote_asset(
+                RemoteExecutionMetadata::default(),
+                RemoteAssetRequest {
+                    kind: RemoteAssetKind::Directory,
+                    uris: vec!["https://example.com/repo.git".to_owned()],
+                    qualifiers: vec![],
+                    digest_function: 9,
+                    timeout_seconds: None,
+                },
+            )
+            .await?;
+        assert_eq!(directory.digest.hash, "b".repeat(64));
+        assert_eq!(directory.digest.size_in_bytes, 84);
+        assert_eq!(directory.digest_function, 9);
+
+        let inline_error = client
+            .fetch_remote_asset(
+                RemoteExecutionMetadata::default(),
+                blob_asset_request("inline-error"),
+            )
+            .await;
+        let inline_error = match inline_error {
+            Ok(_) => panic!("inline Remote Asset error unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert!(inline_error.to_string().contains("bad asset"));
+
+        let missing_digest = client
+            .fetch_remote_asset(
+                RemoteExecutionMetadata::default(),
+                blob_asset_request("missing-digest"),
+            )
+            .await;
+        let missing_digest = match missing_digest {
+            Ok(_) => panic!("Remote Asset response without a digest unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert!(
+            missing_digest
+                .to_string()
+                .contains("did not contain a digest")
+        );
+
+        server.abort();
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_download_named() -> anyhow::Result<()> {
@@ -1922,6 +2287,8 @@ mod tests {
             req,
             None,
             10000,
+            1,
+            None,
             |req| {
                 let res = res.clone();
                 let digest1 = digest1.clone();
@@ -2029,6 +2396,8 @@ mod tests {
             req,
             None,
             10, // kept small to simulate a large file download
+            1,
+            None,
             |req| {
                 let res = res.clone();
                 let digest1 = digest1.clone();
@@ -2111,6 +2480,8 @@ mod tests {
             req,
             None,
             100000,
+            1,
+            None,
             |req| {
                 let res = res.clone();
                 let digest1 = digest1.clone();
@@ -2198,6 +2569,8 @@ mod tests {
             req,
             None,
             7,
+            1,
+            None,
             |req| {
                 counter.fetch_add(1, Ordering::Relaxed);
                 let res = BatchReadBlobsResponse {
@@ -2267,6 +2640,8 @@ mod tests {
             req,
             None,
             10, // intentionally small value to keep data in the test blobs small
+            1,
+            None,
             |req| {
                 let res = res.clone();
                 let digest1 = digest1.clone();
@@ -2323,6 +2698,8 @@ mod tests {
             req,
             None,
             100000,
+            1,
+            None,
             |req| {
                 let res = res.clone();
                 async move {
@@ -2362,6 +2739,8 @@ mod tests {
             req,
             None,
             0,
+            1,
+            None,
             |_req| async { panic!("not called") },
             |req| async move {
                 assert_eq!(req.resource_name, "instance/blobs/aa/0");
@@ -2432,6 +2811,8 @@ mod tests {
             req,
             None,
             10000,
+            None,
+            1,
             None,
             |req| {
                 let res = res.clone();
@@ -2517,6 +2898,8 @@ mod tests {
             None,
             10, // kept small to simulate a large file upload
             None,
+            1,
+            None,
             |req| {
                 let res = res.clone();
                 let digest1 = digest1.clone();
@@ -2592,6 +2975,8 @@ mod tests {
             None,
             10, // kept small to simulate a large inlined upload
             None,
+            1,
+            None,
             |req| {
                 let res = res.clone();
                 let digest1 = digest1.clone();
@@ -2653,6 +3038,8 @@ mod tests {
             req,
             None,
             10,
+            None,
+            1,
             None,
             |_req| async move {
                 panic!("This should not be called as there are no blobs to upload in batch");
@@ -2716,6 +3103,8 @@ mod tests {
             None,
             3,
             None,
+            1,
+            None,
             |_req| async move {
                 panic!("Not called");
             },
@@ -2763,6 +3152,8 @@ mod tests {
                     compressor,
                     0, // max_total_batch_size=0 forces bytestream API
                     None,
+                    1,
+                    None,
                     |_req| async move {
                         panic!("Not called");
                     },
@@ -2787,6 +3178,8 @@ mod tests {
                     },
                     compressor,
                     1024, // forces the batch API
+                    None,
+                    1,
                     None,
                     |_req| async move {
                         panic!("Not called");
@@ -2835,6 +3228,8 @@ mod tests {
             None,
             1,
             None,
+            1,
+            None,
             |_req| async move {
                 panic!("Not called");
             },
@@ -2880,6 +3275,8 @@ mod tests {
             &InstanceName(Some("instance".to_owned())),
             req,
             Some(Compressor::Zstd),
+            1,
+            None,
             1,
             None,
             |_req| async move {
@@ -2952,6 +3349,8 @@ async fn test_upload_compressed() -> anyhow::Result<()> {
         Some(Compressor::Zstd),
         1,
         None,
+        1,
+        None,
         |_req| async move {
             panic!("Not called");
         },
@@ -2998,6 +3397,8 @@ async fn test_download_compressed() -> anyhow::Result<()> {
         },
         Some(Compressor::Zstd),
         10,
+        1,
+        None,
         |_req| async { panic!("not called") },
         |_req| async move {
             Ok(Box::pin(futures::stream::iter(
