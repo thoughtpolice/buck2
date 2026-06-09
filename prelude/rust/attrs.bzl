@@ -219,6 +219,22 @@ def _cxx_toolchain_arg():
 
 def _workspaces_arg():
     return {
+        "_workspace_exclude_patterns": attrs.list(
+            attrs.string(),
+            default = [],
+            doc = """
+    Internal implementation detail of Rust workspaces. This should not be set manually and will be
+     replaced in favor of metadata in a future version of buck2.
+""",
+        ),
+        "_workspace_patterns": attrs.list(
+            attrs.string(),
+            default = [],
+            doc = """
+    Internal implementation detail of Rust workspaces. This should not be set manually and will be
+     replaced in favor of metadata in a future version of buck2.
+""",
+        ),
         "_workspaces": attrs.list(
             attrs.label(),
             default = [],
@@ -254,7 +270,7 @@ rust_common = struct(
 
 # Values of the `_rust_analyzer_target_kind` attribute, which tells rust-analyzer
 # what kind of crate a target produces.
-RustAnalyzerTargetKind = enum("bin", "lib", "test")
+RustAnalyzerTargetKind = enum("bin", "lib", "test", "unit_test")
 
 def rust_common_attributes(is_binary: bool):
     return (
@@ -288,6 +304,9 @@ def rust_analyzer_target_kind(kind: str) -> dict[str, Attr]:
         "_rust_analyzer_target_kind": attrs.default_only(
             attrs.enum(RustAnalyzerTargetKind.values(), default = kind),
         ),
+        # Should require `RustAnalyzerInfo`, but `rust-analyzer/provider.bzl`
+        # loads this file. `rust_analyzer_provider` looks it up instead.
+        "unit_test_of": attrs.option(attrs.dep(), default = None),
     }
 
 def miri_interpreted_attr() -> dict[str, Attr]:
