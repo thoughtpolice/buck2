@@ -102,6 +102,12 @@ pub(crate) enum RunActionError {
         "`{}` was marked to be materialized on failure but is not declared as an output of the action.", .path
     )]
     FailedActionArtifactNotDeclared { path: String },
+    #[error("`stdout` and `stderr` cannot capture to the same artifact `{}`", .path)]
+    StdoutStderrSameArtifact { path: String },
+    #[error(
+        "artifact `{}` passed to `{}` is also used as an output elsewhere in the action, which is not allowed", .path, .param
+    )]
+    CaptureArtifactAlsoDeclaredAsOutput { param: &'static str, path: String },
     #[error(
         "Action is marked with `incremental_remote_outputs` but output `{}` is content-based, which is not allowed.", .path
     )]
@@ -167,6 +173,15 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
     ///       running the action; otherwise the action executes normally (graceful fallback)
     ///     * Requires `buck2.use_network_action_output_cache=true` config to take effect
     ///     * Example use case: caching network downloads in containerized offline build environments
+    /// * `disable_local_sandbox`: disables local sandboxing for this specific action (default: `false`)
+    ///     * When `true`, this action will run without a sandbox even if the executor has sandboxing
+    ///       enabled. Useful for actions that need to read absolute paths outside the project,
+    ///       require network access, or have known hermiticity issues.
+    /// * `clear_environment`: clears all inherited environment variables before running the action (default: `false`)
+    ///     * When `true`, the action starts with an empty environment. Only variables explicitly
+    ///       set via the `env` parameter will be available to the action.
+    ///     * Useful for actions that are sensitive to ambient environment state, e.g. programs
+    ///       with hardcoded limits on envp entry sizes.
     /// * The `prefer_local`, `prefer_remote` and `local_only` options allow selecting where the
     /// action should run if the executor selected for this target is a hybrid executor.
     ///     * All those options disable concurrent execution: the action will run on the preferred
@@ -213,6 +228,13 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
     ///     * The output must also be declared as an output of the action
     ///     * The output artifact must be created if the action fails
     ///     * Nothing will be provided if left empty (Which is the default)
+    ///  * `stdout`: an optional output artifact that receives everything the command writes to
+    ///    its stdout. Passing an artifact here declares it as an output of this action; it must
+    ///    not also be used as an output elsewhere in the action. The command's stdout is still
+    ///    reported to the console and the event log as usual ("tee" semantics). This works with
+    ///    both local and remote execution as well as with cache hits.
+    ///  * `stderr`: like `stdout`, but captures the command's stderr. `stdout` and `stderr`
+    ///    must be distinct artifacts.
     ///
     /// When actions execute, they'll do so from the root of the repository. As they execute,
     /// actions have exclusive access to their output directory.
@@ -274,6 +296,8 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
             Either<ValueOf<'v, &'v WorkerRunInfo<'v>>, ValueOf<'v, &'v RunInfo<'v>>>,
         >,
         #[starlark(require = named, default = false)] unique_input_inodes: bool,
+        #[starlark(require = named, default = false)] disable_local_sandbox: bool,
+        #[starlark(require = named, default = false)] clear_environment: bool,
         #[starlark(require = named, default = NoneOr::None)] error_handler: NoneOr<
             StarlarkCallable<'v>,
         >,
@@ -291,6 +315,13 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
         // Note: Intentionally don't support frozen output artifacts
         #[starlark(require = named, default = UnpackListOrTuple::default())]
         outputs_for_error_handler: UnpackListOrTuple<
+            ValueTyped<'v, StarlarkOutputArtifact<'v>>,
+        >,
+        // Note: Intentionally don't support frozen output artifacts
+        #[starlark(require = named, default = NoneOr::None)] stdout: NoneOr<
+            ValueTyped<'v, StarlarkOutputArtifact<'v>>,
+        >,
+        #[starlark(require = named, default = NoneOr::None)] stderr: NoneOr<
             ValueTyped<'v, StarlarkOutputArtifact<'v>>,
         >,
         #[starlark(require = named, default = NoneOr::None)] expect_eligible_for_dedupe: NoneOr<
@@ -447,7 +478,7 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
         };
 
         let RunCommandArtifactVisitor {
-            inner: artifacts,
+            inner: mut artifacts,
             tagged_outputs,
             inputs_with_multiple_tags_for_dep_files,
             ..
@@ -455,6 +486,36 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
 
         if let Some(frozen) = { artifacts.frozen_outputs }.pop() {
             return Err(buck2_error::Error::from(ArtifactErrors::DuplicateBind(frozen)).into());
+        }
+
+        let stdout = stdout.into_option();
+        let stderr = stderr.into_option();
+
+        if let (Some(stdout), Some(stderr)) = (&stdout, &stderr) {
+            if stdout.artifact() == stderr.artifact() {
+                return Err(buck2_error::Error::from(
+                    RunActionError::StdoutStderrSameArtifact {
+                        path: stdout.to_string(),
+                    },
+                )
+                .into());
+            }
+        }
+
+        for (param, capture) in [("stdout", &stdout), ("stderr", &stderr)] {
+            if let Some(o) = capture {
+                let artifact = o.artifact();
+                if artifacts.declared_outputs.contains(&artifact) {
+                    return Err(buck2_error::Error::from(
+                        RunActionError::CaptureArtifactAlsoDeclaredAsOutput {
+                            param,
+                            path: o.to_string(),
+                        },
+                    )
+                    .into());
+                }
+                artifacts.declared_outputs.insert(artifact);
+            }
         }
 
         let mut dep_files_configuration = RunActionDepFiles::new();
@@ -551,6 +612,8 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
             },
             identifier: identifier.into_option(),
             outputs_for_error_handler: outputs_for_error_handler.items,
+            stdout,
+            stderr,
         });
 
         let re_dependencies = remote_execution_dependencies
@@ -609,6 +672,8 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
             allow_offline_output_cache,
             force_full_hybrid_if_capable,
             unique_input_inodes,
+            disable_local_sandbox,
+            clear_environment,
             remote_execution_dependencies: re_dependencies,
             re_gang_workers,
             remote_execution_custom_image: re_custom_image,
