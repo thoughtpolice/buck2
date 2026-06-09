@@ -50,9 +50,12 @@ pub(crate) struct BuildInfo {
 
 impl fmt::Display for BuildInfo {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if !buck2_core::is_open_source() {
+            writeln!(f, "buck2 UI: https://www.internalfb.com/buck2/{}", self.uuid)?;
+        }
         write!(
             f,
-            "buck2 UI: https://www.internalfb.com/buck2/{}
+            "trace id: {}
 timestamp: {}
 command: {}
 working dir: {}
