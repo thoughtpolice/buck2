@@ -437,6 +437,24 @@ impl ResourceControlConfig {
 pub enum LogDownloadMethod {
     Manifold,
     Curl(String),
+    Command(String),
+    None,
+}
+
+#[derive(Allocative, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum LogUploadMethod {
+    Manifold,
+    Command(String),
+    None,
+}
+
+#[derive(Allocative, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RageUploadMethod {
+    /// Use Meta-internal pastry/manifold/scribe (fbcode only)
+    Internal,
+    /// Pipe rage output to an external command's stdin
+    Command(String),
+    /// Just print to stdout, no upload
     None,
 }
 
@@ -515,6 +533,8 @@ pub struct DaemonStartupOptions {
     pub http: HttpConfig,
     pub resource_control: ResourceControlConfig,
     pub log_download_method: LogDownloadMethod,
+    pub log_upload_method: LogUploadMethod,
+    pub rage_upload_method: RageUploadMethod,
     pub macos_qos_class: Option<MacosQosClass>,
     pub daemon_idle_timeout_s: Option<u64>,
     /// Pagable DICE storage settings, or `None` when paging is disabled.
@@ -541,8 +561,20 @@ impl DaemonStartupConfig {
 
         let log_download_method = {
             let log_download = &settings.log_download;
+            let log_download_cmd = config.get(BuckconfigKeyRef {
+                section: "buck2",
+                property: "log_download_cmd",
+            });
             if log_download.log_use_manifold(&mut buckconfig)? {
                 LogDownloadMethod::Manifold
+            } else if let Some(cmd) = log_download_cmd {
+                if cmd.is_empty() {
+                    return Err(buck2_error::buck2_error!(
+                        buck2_error::ErrorTag::Input,
+                        "log_download_cmd is empty, but log_use_manifold is false"
+                    ));
+                }
+                LogDownloadMethod::Command(cmd.to_owned())
             } else if let Some(log_url) = log_download.log_url(&mut buckconfig)? {
                 if log_url.is_empty() {
                     return Err(buck2_error::buck2_error!(
@@ -555,6 +587,27 @@ impl DaemonStartupConfig {
                 LogDownloadMethod::None
             }
         };
+
+        let log_upload_method = {
+            let log_upload_cmd = config.get(BuckconfigKeyRef {
+                section: "buck2",
+                property: "log_upload_cmd",
+            });
+            if let Some(cmd) = log_upload_cmd {
+                if cmd.is_empty() {
+                    Err(buck2_error::buck2_error!(
+                        buck2_error::ErrorTag::Input,
+                        "log_upload_cmd is set but empty"
+                    ))
+                } else {
+                    Ok(LogUploadMethod::Command(cmd.to_owned()))
+                }
+            } else if cfg!(fbcode_build) && !buck2_core::is_open_source() {
+                Ok(LogUploadMethod::Manifold)
+            } else {
+                Ok(LogUploadMethod::None)
+            }
+        }?;
 
         let startup_options = DaemonStartupOptions {
             share_dice: config
@@ -581,6 +634,26 @@ impl DaemonStartupConfig {
                 config,
             )?,
             log_download_method,
+            log_upload_method,
+            rage_upload_method: {
+                let rage_upload_cmd = config.get(BuckconfigKeyRef {
+                    section: "buck2",
+                    property: "rage_upload_cmd",
+                });
+                if let Some(cmd) = rage_upload_cmd {
+                    if cmd.is_empty() {
+                        return Err(buck2_error::buck2_error!(
+                            buck2_error::ErrorTag::Input,
+                            "rage_upload_cmd is set but empty"
+                        ));
+                    }
+                    RageUploadMethod::Command(cmd.to_owned())
+                } else if cfg!(fbcode_build) && !buck2_core::is_open_source() {
+                    RageUploadMethod::Internal
+                } else {
+                    RageUploadMethod::None
+                }
+            },
             macos_qos_class: {
                 if buck2_env!("BUCK2_DISABLE_MACOS_QOS", bool)? {
                     return Err(buck2_error::buck2_error!(
@@ -640,6 +713,16 @@ impl DaemonStartupConfig {
                 LogDownloadMethod::Manifold
             } else {
                 LogDownloadMethod::None
+            },
+            log_upload_method: if cfg!(fbcode_build) {
+                LogUploadMethod::Manifold
+            } else {
+                LogUploadMethod::None
+            },
+            rage_upload_method: if cfg!(fbcode_build) {
+                RageUploadMethod::Internal
+            } else {
+                RageUploadMethod::None
             },
             macos_qos_class: None,
             daemon_idle_timeout_s: None,

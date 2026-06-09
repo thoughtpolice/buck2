@@ -218,3 +218,90 @@ fn declare_output_require_bound() -> buck2_error::Result<()> {
         _ => panic!("Expected a specific failure containing `{expect}`, got {ret:?}"),
     })
 }
+
+#[test]
+fn run_capture_stdout_stderr() -> buck2_error::Result<()> {
+    let content = indoc!(
+        r#"
+         def test(c):
+             out = c.actions.declare_output("out")
+             stdout = c.actions.declare_output("stdout.txt")
+             stderr = c.actions.declare_output("stderr.txt")
+             c.actions.run(
+                 ["cmd", out.as_output()],
+                 category = "test_category",
+                 stdout = stdout.as_output(),
+                 stderr = stderr.as_output(),
+             )
+         "#
+    );
+
+    run_ctx_test(content, |ret| {
+        ret.unwrap();
+        Ok(())
+    })
+}
+
+#[test]
+fn run_capture_binds_artifact_as_output() -> buck2_error::Result<()> {
+    // Passing an artifact via `stdout` declares it as an output of the action: it becomes
+    // bound and can be used as an input to a subsequent action, and the action needs no
+    // other outputs.
+    let content = indoc!(
+        r#"
+         def test(c):
+             stdout = c.actions.declare_output("stdout.txt")
+             c.actions.run(["cmd"], category = "test_category", stdout = stdout.as_output())
+             out = c.actions.declare_output("out")
+             c.actions.run(["cmd2", stdout, out.as_output()], category = "other_category")
+         "#
+    );
+
+    run_ctx_test(content, |ret| {
+        ret.unwrap();
+        Ok(())
+    })
+}
+
+#[test]
+fn run_capture_same_artifact_rejected() -> buck2_error::Result<()> {
+    let content = indoc!(
+        r#"
+         def test(c):
+             log = c.actions.declare_output("log")
+             c.actions.run(
+                 ["cmd"],
+                 category = "test_category",
+                 stdout = log.as_output(),
+                 stderr = log.as_output(),
+             )
+         "#
+    );
+
+    let expect = "cannot capture to the same artifact";
+    run_ctx_test(content, |ret| match ret {
+        Err(e) if e.to_string().contains(expect) => Ok(()),
+        _ => panic!("Expected a specific failure containing `{expect}`, got {ret:?}"),
+    })
+}
+
+#[test]
+fn run_capture_artifact_also_output_rejected() -> buck2_error::Result<()> {
+    let content = indoc!(
+        r#"
+         def test(c):
+             out = c.actions.declare_output("out")
+             c.actions.run(
+                 ["cmd", out.as_output()],
+                 category = "test_category",
+                 stdout = out.as_output(),
+             )
+         "#
+    );
+
+    let expect = "is also used as an output elsewhere in the action";
+    run_ctx_test(content, |ret| match ret {
+        Err(e) if e.to_string().contains(expect) => Ok(()),
+        _ => panic!("Expected a specific failure containing `{expect}`, got {ret:?}"),
+    })
+}
