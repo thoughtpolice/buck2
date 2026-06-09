@@ -67,6 +67,22 @@ impl RemoteCommandStdStreams {
         self.stderr.to_lossy(&self.client, self.digest_config).await
     }
 
+    /// Fetch the full stdout bytes, downloading from CAS if the stream was not inlined.
+    pub async fn stdout_bytes(&self) -> buck2_error::Result<Vec<u8>> {
+        self.stdout
+            .clone()
+            .into_bytes(&self.client, self.digest_config)
+            .await
+    }
+
+    /// Fetch the full stderr bytes, downloading from CAS if the stream was not inlined.
+    pub async fn stderr_bytes(&self) -> buck2_error::Result<Vec<u8>> {
+        self.stderr
+            .clone()
+            .into_bytes(&self.client, self.digest_config)
+            .await
+    }
+
     pub(crate) async fn into_stdout_stderr_bytes(self) -> buck2_error::Result<(Vec<u8>, Vec<u8>)> {
         future::try_join(
             self.stdout.into_bytes(&self.client, self.digest_config),

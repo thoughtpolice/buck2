@@ -50,4 +50,34 @@ impl TestState {
     pub fn not_executed(&self) -> u64 {
         self.skipped + self.omitted
     }
+
+    /// Whether any test discovery or test result events have been observed.
+    pub fn has_activity(&self) -> bool {
+        let TestState {
+            discovered,
+            pass,
+            fail,
+            fatal,
+            timeout,
+            skipped,
+            omitted,
+            infra_failure,
+            retry,
+            unknown,
+            listing_success,
+            listing_failed,
+        } = self;
+        *discovered > 0
+            || *pass > 0
+            || *fail > 0
+            || *fatal > 0
+            || *timeout > 0
+            || *skipped > 0
+            || *omitted > 0
+            || *infra_failure > 0
+            || *retry > 0
+            || *unknown > 0
+            || *listing_success > 0
+            || *listing_failed > 0
+    }
 }
