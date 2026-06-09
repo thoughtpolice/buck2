@@ -472,6 +472,24 @@ impl ResourceControlConfig {
 pub enum LogDownloadMethod {
     Manifold,
     Curl(String),
+    Command(String),
+    None,
+}
+
+#[derive(Allocative, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum LogUploadMethod {
+    Manifold,
+    Command(String),
+    None,
+}
+
+#[derive(Allocative, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RageUploadMethod {
+    /// Use Meta-internal pastry/manifold/scribe (fbcode only)
+    Internal,
+    /// Pipe rage output to an external command's stdin
+    Command(String),
+    /// Just print to stdout, no upload
     None,
 }
 
@@ -576,6 +594,8 @@ pub struct DaemonStartupConfig {
     pub http: HttpConfig,
     pub resource_control: ResourceControlConfig,
     pub log_download_method: LogDownloadMethod,
+    pub log_upload_method: LogUploadMethod,
+    pub rage_upload_method: RageUploadMethod,
     pub health_check_config: HealthCheckConfig,
     pub retained_event_logs: usize,
     pub macos_qos_class: Option<String>,
@@ -603,11 +623,24 @@ impl DaemonStartupConfig {
             if use_manifold {
                 Ok(LogDownloadMethod::Manifold)
             } else {
+                let log_download_cmd = config.get(BuckconfigKeyRef {
+                    section: "buck2",
+                    property: "log_download_cmd",
+                });
                 let log_url = config.get(BuckconfigKeyRef {
                     section: "buck2",
                     property: "log_url",
                 });
-                if let Some(log_url) = log_url {
+                if let Some(cmd) = log_download_cmd {
+                    if cmd.is_empty() {
+                        Err(buck2_error::buck2_error!(
+                            buck2_error::ErrorTag::Input,
+                            "log_download_cmd is empty, but log_use_manifold is false"
+                        ))
+                    } else {
+                        Ok(LogDownloadMethod::Command(cmd.to_owned()))
+                    }
+                } else if let Some(log_url) = log_url {
                     if log_url.is_empty() {
                         Err(buck2_error::buck2_error!(
                             buck2_error::ErrorTag::Input,
@@ -619,6 +652,27 @@ impl DaemonStartupConfig {
                 } else {
                     Ok(LogDownloadMethod::None)
                 }
+            }
+        }?;
+
+        let log_upload_method = {
+            let log_upload_cmd = config.get(BuckconfigKeyRef {
+                section: "buck2",
+                property: "log_upload_cmd",
+            });
+            if let Some(cmd) = log_upload_cmd {
+                if cmd.is_empty() {
+                    Err(buck2_error::buck2_error!(
+                        buck2_error::ErrorTag::Input,
+                        "log_upload_cmd is set but empty"
+                    ))
+                } else {
+                    Ok(LogUploadMethod::Command(cmd.to_owned()))
+                }
+            } else if cfg!(fbcode_build) && !buck2_core::is_open_source() {
+                Ok(LogUploadMethod::Manifold)
+            } else {
+                Ok(LogUploadMethod::None)
             }
         }?;
 
@@ -657,6 +711,26 @@ impl DaemonStartupConfig {
             http: HttpConfig::from_config(config)?,
             resource_control: ResourceControlConfig::from_config(config)?,
             log_download_method,
+            log_upload_method,
+            rage_upload_method: {
+                let rage_upload_cmd = config.get(BuckconfigKeyRef {
+                    section: "buck2",
+                    property: "rage_upload_cmd",
+                });
+                if let Some(cmd) = rage_upload_cmd {
+                    if cmd.is_empty() {
+                        return Err(buck2_error::buck2_error!(
+                            buck2_error::ErrorTag::Input,
+                            "rage_upload_cmd is set but empty"
+                        ));
+                    }
+                    RageUploadMethod::Command(cmd.to_owned())
+                } else if cfg!(fbcode_build) && !buck2_core::is_open_source() {
+                    RageUploadMethod::Internal
+                } else {
+                    RageUploadMethod::None
+                }
+            },
             health_check_config: HealthCheckConfig::from_config(config)?,
             retained_event_logs: config
                 .get(BuckconfigKeyRef {
@@ -727,6 +801,16 @@ impl DaemonStartupConfig {
                 LogDownloadMethod::Manifold
             } else {
                 LogDownloadMethod::None
+            },
+            log_upload_method: if cfg!(fbcode_build) {
+                LogUploadMethod::Manifold
+            } else {
+                LogUploadMethod::None
+            },
+            rage_upload_method: if cfg!(fbcode_build) {
+                RageUploadMethod::Internal
+            } else {
+                RageUploadMethod::None
             },
             health_check_config: HealthCheckConfig::default(),
             retained_event_logs: DEFAULT_RETAINED_EVENT_LOGS,
