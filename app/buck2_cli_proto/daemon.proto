@@ -572,6 +572,11 @@ message TestRequest {
   // Whether `RunInfo` providers for targets matching `target_patterns`
   // should be built instead of only `ExternalTestInfo` providers.
   bool build_run_info = 16;
+
+  // Whether to ignore the `[test] default_exclude_labels` /
+  // `default_include_labels` buckconfig defaults. When true, only the label
+  // filters supplied on the CLI (`--exclude` / `--include`) are applied.
+  bool ignore_default_test_filters = 17;
 }
 
 message BxlRequest {

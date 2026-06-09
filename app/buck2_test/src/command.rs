@@ -98,6 +98,7 @@ use buck2_test_api::data::TestResult;
 use buck2_test_api::data::TestStatus;
 use buck2_test_api::protocol::TestExecutor;
 use buck2_test_api::protocol::TestOrchestrator;
+use dice::DiceComputations;
 use dice::DiceTransaction;
 use dice::LinearRecomputeDiceComputations;
 use dice_futures::cancellation::CancellationContext;
@@ -457,14 +458,37 @@ async fn test(
     let mut test_executor_args = request.test_executor_args.clone();
     test_executor_args.extend(extra_tpx_args);
 
+    // Default label filters from buckconfig, e.g.
+    //   [test]
+    //     default_exclude_labels = slow, flaky
+    //     default_include_labels =
+    // are merged with (appended to) whatever was passed on the CLI via
+    // `--exclude` / `--include`. This lets a repo skip e.g. `slow` tests by
+    // default. Because `TestLabelFiltering::is_excluded` checks include filters
+    // before exclude filters, a user can still run the skipped tests explicitly
+    // with `buck2 test //... --include slow`, or opt out of the defaults
+    // entirely with `--no-default-test-filters`.
+    let mut excluded_labels = request.excluded_labels.clone();
+    let mut included_labels = request.included_labels.clone();
+    if !request.ignore_default_test_filters {
+        excluded_labels.extend(
+            read_default_test_labels(&mut ctx, cell_resolver.root_cell(), "default_exclude_labels")
+                .await?,
+        );
+        included_labels.extend(
+            read_default_test_labels(&mut ctx, cell_resolver.root_cell(), "default_include_labels")
+                .await?,
+        );
+    }
+
     let test_outcome = test_targets(
         ctx.dupe(),
         resolved_pattern,
         global_cfg_options,
         test_executor_args,
         Arc::new(TestLabelFiltering::new(
-            request.included_labels.clone(),
-            request.excluded_labels.clone(),
+            included_labels,
+            excluded_labels,
             request.always_exclude,
             request.build_filtered_targets,
         )),
@@ -1710,6 +1734,30 @@ struct TestLabelFiltering {
     build_filtered_targets: bool,
 }
 
+/// Read a comma-separated list of default test labels from the `[test]` section of
+/// buckconfig (e.g. `default_exclude_labels = slow, flaky`). Whitespace around each
+/// entry is trimmed and empty entries are dropped. Returns an empty `Vec` if unset.
+async fn read_default_test_labels(
+    ctx: &mut DiceComputations<'_>,
+    cell: CellName,
+    property: &'static str,
+) -> buck2_error::Result<Vec<String>> {
+    Ok(ctx
+        .get_legacy_config_property(cell, BuckconfigKeyRef {
+            section: "test",
+            property,
+        })
+        .await?
+        .map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 impl TestLabelFiltering {
     fn is_excluded(&self, labels: Vec<&str>) -> bool {
         let mut matched = self.included_labels.is_empty();
@@ -1985,6 +2033,26 @@ mod tests {
         );
 
         assert!(conflicting_filter.is_excluded(vec!["include_me"]));
+    }
+
+    #[test]
+    fn default_exclude_labels_skip_by_default_but_include_overrides() {
+        // Models `[test] default_exclude_labels = slow` being merged into the
+        // excluded labels with no CLI `--include`: slow targets are skipped,
+        // everything else runs.
+        let default_skip = TestLabelFiltering::new(vec![], vec!["slow".to_owned()], false, false);
+        assert!(default_skip.is_excluded(vec!["slow"]));
+        assert!(default_skip.is_excluded(vec!["slow", "integration"]));
+        assert!(!default_skip.is_excluded(vec!["fast"]));
+        assert!(!default_skip.is_excluded(vec![]));
+
+        // Models the same default merged with an explicit `--include slow`: the
+        // include filter is checked first, so slow targets are kept and
+        // everything without the `slow` label is filtered out.
+        let include_overrides =
+            TestLabelFiltering::new(vec!["slow".to_owned()], vec!["slow".to_owned()], false, false);
+        assert!(!include_overrides.is_excluded(vec!["slow"]));
+        assert!(include_overrides.is_excluded(vec!["fast"]));
     }
 
     #[test]
