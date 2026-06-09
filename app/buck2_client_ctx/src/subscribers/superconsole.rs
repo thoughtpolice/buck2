@@ -9,6 +9,7 @@
  */
 
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,7 +23,9 @@ use buck2_event_observer::display;
 use buck2_event_observer::display::TargetDisplayOptions;
 use buck2_event_observer::display::display_file_watcher_end;
 use buck2_event_observer::event_observer::DebugEventObserverExtra;
+use buck2_event_observer::re_state::ReState;
 use buck2_event_observer::session_info::SessionInfo;
+use buck2_event_observer::two_snapshots::TwoSnapshots;
 use buck2_event_observer::unpack_event::VisitorError;
 use buck2_event_observer::unpack_event::unpack_event;
 use buck2_event_observer::verbosity::Verbosity;
@@ -48,6 +51,8 @@ use superconsole::style::StyledContent;
 use superconsole::style::Stylize;
 use tokio::sync::mpsc::Receiver;
 
+use crate::console_interaction_stream::ConsoleInteraction;
+use crate::console_interaction_stream::ConsoleKey;
 use crate::console_interaction_stream::SuperConsoleToggle;
 use crate::subscribers::console_output_limit::EmitResult;
 use crate::subscribers::emit_event::emit_event_if_relevant;
@@ -62,6 +67,9 @@ use crate::subscribers::superconsole::io::IoHeader;
 use crate::subscribers::superconsole::re::ReHeader;
 use crate::subscribers::superconsole::session_info::SessionInfoComponent;
 use crate::subscribers::superconsole::system_warning::SystemWarningComponent;
+use crate::subscribers::superconsole::test::FINISHED_TESTS_CAPACITY;
+use crate::subscribers::superconsole::test::FinishedTest;
+use crate::subscribers::superconsole::test::FinishedTestList;
 use crate::subscribers::superconsole::test::TestHeader;
 use crate::subscribers::superconsole::timed_list::Cutoffs;
 use crate::subscribers::superconsole::timed_list::TimedList;
@@ -388,6 +396,9 @@ pub struct SuperConsoleState {
     simple_console: SimpleConsole<DebugEventObserverExtra>,
     config: SuperConsoleConfig,
     active_warnings: Option<Vec<DisplayReport>>,
+    /// Most recently finished tests, rendered in the bounded finished-tests
+    /// window (`[ui] slim_test_output`). Empty unless slim mode is active.
+    finished_tests: VecDeque<FinishedTest>,
 }
 
 impl SuperConsoleState {
@@ -408,6 +419,9 @@ pub struct SuperConsoleConfig {
     /// Two lines for root events with single child event.
     pub two_lines: bool,
     pub max_lines: usize,
+    /// Hide per-test scrollback lines for non-problem test results, leaving
+    /// them to the live counters (`[ui] slim_test_output`).
+    pub slim_test_output: bool,
 }
 
 impl Default for SuperConsoleConfig {
@@ -416,12 +430,13 @@ impl Default for SuperConsoleConfig {
             enable_dice: false,
             enable_debug_events: false,
             enable_detailed_re: false,
-            enable_io: false,
+            enable_io: true,
             enable_commands: false,
             expanded_progress: true,
             display_platform: false,
             two_lines: false,
             max_lines: 10,
+            slim_test_output: true,
         }
     }
 }
@@ -545,6 +560,7 @@ impl Component for BuckRootComponent<'_> {
         draw.draw(
             &SessionInfoComponent {
                 session_info: self.state.session_info(),
+                re_state: self.state.simple_console.observer.re_state(),
             },
             mode,
         )?;
@@ -559,6 +575,7 @@ impl Component for BuckRootComponent<'_> {
         draw.draw(
             &IoHeader {
                 super_console_config: &self.state.config,
+                re_state: self.state.simple_console.observer.re_state(),
                 two_snapshots: self.state.simple_console.observer.two_snapshots(),
             },
             mode,
@@ -598,6 +615,13 @@ impl Component for BuckRootComponent<'_> {
             &CommandsComponent {
                 super_console_config: &self.state.config,
                 action_stats: self.state.simple_console.observer.action_stats(),
+            },
+            mode,
+        )?;
+        draw.draw(
+            &FinishedTestList {
+                finished: &self.state.finished_tests,
+                max_lines: self.state.config.max_lines,
             },
             mode,
         )?;
@@ -650,7 +674,7 @@ impl StatefulSuperConsole {
         config: SuperConsoleConfig,
         health_check_reports_receiver: Option<Receiver<Vec<DisplayReport>>>,
     ) -> buck2_error::Result<Self> {
-        let header = format!("Command: {command_name}.");
+        let header = format!("Command {command_name}");
         Ok(Self::Running(StatefulSuperConsoleImpl {
             header,
             state: SuperConsoleState::new(
@@ -743,6 +767,7 @@ impl SuperConsoleState {
             ),
             config,
             active_warnings: None,
+            finished_tests: VecDeque::new(),
         })
     }
 
@@ -755,6 +780,14 @@ impl SuperConsoleState {
 
     pub fn session_info(&self) -> &SessionInfo {
         self.simple_console.observer.session_info()
+    }
+
+    pub fn re_state(&self) -> &ReState {
+        self.simple_console.observer.re_state()
+    }
+
+    pub fn two_snapshots(&self) -> &TwoSnapshots {
+        self.simple_console.observer.two_snapshots()
     }
 
     pub fn tick(&mut self, tick: Tick) {
@@ -1056,6 +1089,25 @@ impl StatefulSuperConsoleImpl {
         &mut self,
         result: &buck2_data::TestResult,
     ) -> buck2_error::Result<()> {
+        // In slim mode finished tests stream through the bounded finished-tests
+        // window instead of growing the scrollback; only problems additionally
+        // get a persistent line (with their details). High verbosity (`-v`) and
+        // `[ui] slim_test_output = false` fall back to the normal per-result
+        // output.
+        let windowed = self.state.config.slim_test_output && !self.verbosity.print_all_commands();
+
+        if windowed {
+            let finished = &mut self.state.finished_tests;
+            if finished.len() >= FINISHED_TESTS_CAPACITY {
+                finished.pop_front();
+            }
+            finished.push_back(FinishedTest::new(result));
+
+            if !display::is_test_result_problem(result)? {
+                return Ok(());
+            }
+        }
+
         if let Some(msg) = display::format_test_result(result, self.verbosity)? {
             let byte_count: usize = msg.0.iter().map(|line| line.len()).sum();
             match self.state.simple_console.output_limit.emit(byte_count) {
@@ -1076,138 +1128,167 @@ impl StatefulSuperConsoleImpl {
         &mut self,
         prefs: &buck2_data::ConsolePreferences,
     ) -> buck2_error::Result<()> {
-        self.state.config.max_lines = prefs.max_lines.try_into()?;
+        if let Some(max_lines) = prefs.max_lines {
+            self.state.config.max_lines = max_lines.try_into()?;
+        }
+        if let Some(slim_test_output) = prefs.slim_test_output {
+            self.state.config.slim_test_output = slim_test_output;
+        }
 
         Ok(())
     }
 
     async fn handle_console_interaction(
         &mut self,
-        c: &Option<SuperConsoleToggle>,
+        c: &ConsoleInteraction,
     ) -> buck2_error::Result<()> {
+        let c = match c {
+            ConsoleInteraction::Toggle(c) => c,
+            ConsoleInteraction::Key(key) => {
+                self.games_overlay.g_press_count = 0;
+                if self.games_overlay.active {
+                    use games::console::Control;
+
+                    match key {
+                        ConsoleKey::Escape => self.handle_games_control(Control::Escape),
+                        ConsoleKey::Up => self.handle_games_control(Control::Up),
+                        ConsoleKey::Down => self.handle_games_control(Control::Down),
+                        ConsoleKey::Left => self.handle_games_control(Control::Left),
+                        ConsoleKey::Right => self.handle_games_control(Control::Right),
+                        ConsoleKey::ShiftLeft => self.handle_games_control(Control::ShiftLeft),
+                        ConsoleKey::ShiftRight => self.handle_games_control(Control::ShiftRight),
+                        ConsoleKey::Other => {}
+                    }
+                }
+                return Ok(());
+            }
+            ConsoleInteraction::Resize => {
+                self.super_console.render(&BuckRootComponent {
+                    header: &self.header,
+                    state: &self.state,
+                    games_overlay: &self.games_overlay,
+                })?;
+                return Ok(());
+            }
+        };
+
         // When games overlay is active, route all input to games.
         if self.games_overlay.active {
-            if let Some(toggle) = c {
-                let raw_char = toggle.key();
-                let (first, second) = self.games_overlay.escape_state.feed(raw_char);
-                if let Some(control) = first {
-                    self.handle_games_control(control);
-                }
-                if let Some(control) = second {
-                    self.handle_games_control(control);
-                }
+            let raw_char = c.key();
+            let (first, second) = self.games_overlay.escape_state.feed(raw_char);
+            if let Some(control) = first {
+                self.handle_games_control(control);
+            }
+            if let Some(control) = second {
+                self.handle_games_control(control);
             }
             return Ok(());
         }
 
         // Games not active — check for 'g' activation sequence.
         match c {
-            Some(SuperConsoleToggle::Char('g')) => {
+            SuperConsoleToggle::Char('g') => {
                 self.games_overlay.g_press_count += 1;
                 if self.games_overlay.g_press_count >= 3 {
                     self.games_overlay.activate();
                 }
                 return Ok(());
             }
-            Some(_) => {
+            _ => {
                 // Any other recognized key resets the g counter.
                 self.games_overlay.g_press_count = 0;
             }
-            None => {}
         }
 
         // Normal toggle handling.
         match c {
-            Some(c) => match c {
-                SuperConsoleToggle::Dice => {
-                    self.toggle(c.description(), c.key(), |s| {
-                        &mut s.state.config.enable_dice
-                    })
+            SuperConsoleToggle::Dice => {
+                self.toggle(c.description(), c.key(), |s| {
+                    &mut s.state.config.enable_dice
+                })
+                .await?
+            }
+            SuperConsoleToggle::DebugEvents => {
+                self.toggle(c.description(), c.key(), |s| {
+                    &mut s.state.config.enable_debug_events
+                })
+                .await?
+            }
+            SuperConsoleToggle::TwoLinesMode => {
+                self.toggle(c.description(), c.key(), |s| &mut s.state.config.two_lines)
                     .await?
-                }
-                SuperConsoleToggle::DebugEvents => {
-                    self.toggle(c.description(), c.key(), |s| {
-                        &mut s.state.config.enable_debug_events
-                    })
+            }
+            SuperConsoleToggle::DetailedRE => {
+                self.toggle(c.description(), c.key(), |s| {
+                    &mut s.state.config.enable_detailed_re
+                })
+                .await?
+            }
+            SuperConsoleToggle::Io => {
+                self.toggle(c.description(), c.key(), |s| &mut s.state.config.enable_io)
                     .await?
+            }
+            SuperConsoleToggle::TargetConfigurations => {
+                self.toggle(c.description(), c.key(), |s| {
+                    &mut s.state.config.display_platform
+                })
+                .await?
+            }
+            SuperConsoleToggle::ExpandedProgress => {
+                self.toggle(c.description(), c.key(), |s| {
+                    &mut s.state.config.expanded_progress
+                })
+                .await?
+            }
+            SuperConsoleToggle::Commands => {
+                self.toggle(c.description(), c.key(), |s| {
+                    &mut s.state.config.enable_commands
+                })
+                .await?
+            }
+            SuperConsoleToggle::IncrLines => {
+                self.state.config.max_lines = self.state.config.max_lines.saturating_add(1)
+            }
+            SuperConsoleToggle::DecrLines => {
+                self.state.config.max_lines = self.state.config.max_lines.saturating_sub(1)
+            }
+            SuperConsoleToggle::IncreaseReplaySpeed => {
+                if let Some(message) = self.state.timekeeper.scale_speed(1.5).await {
+                    self.handle_stderr(&message).await?;
                 }
-                SuperConsoleToggle::TwoLinesMode => {
-                    self.toggle(c.description(), c.key(), |s| &mut s.state.config.two_lines)
-                        .await?
+            }
+            SuperConsoleToggle::DecreaseReplaySpeed => {
+                if let Some(message) = self.state.timekeeper.scale_speed(1.0 / 1.5).await {
+                    self.handle_stderr(&message).await?;
                 }
-                SuperConsoleToggle::DetailedRE => {
-                    self.toggle(c.description(), c.key(), |s| {
-                        &mut s.state.config.enable_detailed_re
-                    })
-                    .await?
+            }
+            SuperConsoleToggle::PauseReplay => {
+                if let Some(message) = self.state.timekeeper.toggle_pause().await {
+                    self.handle_stderr(&message).await?;
                 }
-                SuperConsoleToggle::Io => {
-                    self.toggle(c.description(), c.key(), |s| &mut s.state.config.enable_io)
-                        .await?
-                }
-                SuperConsoleToggle::TargetConfigurations => {
-                    self.toggle(c.description(), c.key(), |s| {
-                        &mut s.state.config.display_platform
-                    })
-                    .await?
-                }
-                SuperConsoleToggle::ExpandedProgress => {
-                    self.toggle(c.description(), c.key(), |s| {
-                        &mut s.state.config.expanded_progress
-                    })
-                    .await?
-                }
-                SuperConsoleToggle::Commands => {
-                    self.toggle(c.description(), c.key(), |s| {
-                        &mut s.state.config.enable_commands
-                    })
-                    .await?
-                }
-                SuperConsoleToggle::IncrLines => {
-                    self.state.config.max_lines = self.state.config.max_lines.saturating_add(1)
-                }
-                SuperConsoleToggle::DecrLines => {
-                    self.state.config.max_lines = self.state.config.max_lines.saturating_sub(1)
-                }
-                SuperConsoleToggle::IncreaseReplaySpeed => {
-                    if let Some(message) = self.state.timekeeper.scale_speed(1.5).await {
-                        self.handle_stderr(&message).await?;
-                    }
-                }
-                SuperConsoleToggle::DecreaseReplaySpeed => {
-                    if let Some(message) = self.state.timekeeper.scale_speed(1.0 / 1.5).await {
-                        self.handle_stderr(&message).await?;
-                    }
-                }
-                SuperConsoleToggle::PauseReplay => {
-                    if let Some(message) = self.state.timekeeper.toggle_pause().await {
-                        self.handle_stderr(&message).await?;
-                    }
-                }
-                SuperConsoleToggle::Help => {
-                    let help_message = SuperConsoleToggle::iter()
-                        .map(|t| format!("`{}` = toggle {}", t.key(), t.description()))
-                        .collect::<Vec<_>>()
-                        .join("\n");
+            }
+            SuperConsoleToggle::Help => {
+                let help_message = SuperConsoleToggle::iter()
+                    .map(|t| format!("`{}` = toggle {}", t.key(), t.description()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                self.handle_stderr(&format!(
+                    "Help:\n{}\n`g` x3 = games\nenv var {}=true disables interactive console",
+                    help_message, BUCK_NO_INTERACTIVE_CONSOLE
+                ))
+                .await?
+            }
+            SuperConsoleToggle::Char(_) => {
+                if !self.shown_interactive_console_message {
+                    self.shown_interactive_console_message = true;
                     self.handle_stderr(&format!(
-                        "Help:\n{}\n`g` x3 = games\nenv var {}=true disables interactive console",
-                        help_message, BUCK_NO_INTERACTIVE_CONSOLE
+                        "Buck2 has an interactive console; input is consumed. \
+                         Press `h` for help or set {}=true to disable.",
+                        BUCK_NO_INTERACTIVE_CONSOLE
                     ))
-                    .await?
+                    .await?;
                 }
-                SuperConsoleToggle::Char(_) => {
-                    if !self.shown_interactive_console_message {
-                        self.shown_interactive_console_message = true;
-                        self.handle_stderr(&format!(
-                            "Buck2 has an interactive console; input is consumed. \
-                             Press `h` for help or set {}=true to disable.",
-                            BUCK_NO_INTERACTIVE_CONSOLE
-                        ))
-                        .await?;
-                    }
-                }
-            },
-            None => {}
+            }
         }
 
         Ok(())
@@ -1448,7 +1529,7 @@ impl EventSubscriber for StatefulSuperConsole {
 
     async fn handle_console_interaction(
         &mut self,
-        c: &Option<SuperConsoleToggle>,
+        c: &ConsoleInteraction,
     ) -> buck2_error::Result<()> {
         if let Self::Running(super_console) = self {
             super_console.handle_console_interaction(c).await?;
@@ -1643,6 +1724,7 @@ mod tests {
     use dupe::Dupe;
     use superconsole::testing::SuperConsoleTestingExt;
     use superconsole::testing::assert_frame_contains;
+    use superconsole::testing::frame_contains;
     use superconsole::testing::test_console;
 
     use super::*;
@@ -1816,9 +1898,9 @@ mod tests {
         } else {
             assert_frame_contains(&frame, "Build ID:");
         }
-        assert_frame_contains(&frame, "Network:");
-        assert_frame_contains(&frame, "(reSessionID-123)");
-        assert_frame_contains(&frame, "Remaining");
+        assert_frame_contains(&frame, "RE session:");
+        assert_frame_contains(&frame, "reSessionID-123");
+        assert_frame_contains(&frame, "Loading targets");
 
         console
             .handle_command_result(&buck2_cli_proto::CommandResult { result: None })
@@ -1838,8 +1920,11 @@ mod tests {
             legacy_dice: false,
         };
 
+        let re_state = ReState::new();
+
         let full = SessionInfoComponent {
             session_info: &info,
+            re_state: &re_state,
         }
         .draw_unchecked(
             Dimensions {
@@ -1855,6 +1940,7 @@ mod tests {
 
         let multiline = SessionInfoComponent {
             session_info: &info,
+            re_state: &re_state,
         }
         .draw_unchecked(
             Dimensions {
@@ -1871,6 +1957,7 @@ mod tests {
 
         let too_small = SessionInfoComponent {
             session_info: &info,
+            re_state: &re_state,
         }
         .draw_unchecked(
             Dimensions {
@@ -1881,6 +1968,206 @@ mod tests {
         )?;
 
         assert_eq!(too_small.len(), 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_io_header_network() -> buck2_error::Result<()> {
+        let mut re_state = ReState::new();
+        re_state.add_re_session(&buck2_data::RemoteExecutionSessionCreated {
+            session_id: "reSessionID-123".to_owned(),
+            experiment_name: "".to_owned(),
+            persistent_cache_mode: None,
+        });
+        re_state.update(&buck2_data::Snapshot::default());
+
+        let mut two_snapshots = TwoSnapshots::default();
+        let start = std::time::SystemTime::UNIX_EPOCH;
+        two_snapshots.update(start, &buck2_data::Snapshot::default());
+        two_snapshots.update(
+            start + std::time::Duration::from_secs(10),
+            &buck2_data::Snapshot {
+                re_upload_bytes: 10 * 1024 * 1024,
+                re_download_bytes: 1024 * 1024 * 1024,
+                http_download_bytes: 512 * 1024 * 1024,
+                io_in_flight_read: 1,
+                ..Default::default()
+            },
+        );
+
+        // I/O output is on by default, and carries the network line.
+        let config = SuperConsoleConfig::default();
+        let component = IoHeader {
+            super_console_config: &config,
+            re_state: &re_state,
+            two_snapshots: &two_snapshots,
+        };
+
+        let normal = component
+            .draw_unchecked(
+                Dimensions {
+                    width: 120,
+                    height: 10,
+                },
+                DrawMode::Normal,
+            )?
+            .fmt_for_test()
+            .to_string();
+        // The network stats and in-flight I/O counters share a single line
+        // with the rest of the I/O stats.
+        assert!(
+            normal.contains("Network: ↑ 10MiB 1.0MiB/s ↓ 1.5GiB 154MiB/s  Max RSS"),
+            "unexpected render:\n{normal}"
+        );
+        assert!(normal.contains("Read = 1"), "unexpected render:\n{normal}");
+        assert_eq!(normal.lines().count(), 1, "unexpected render:\n{normal}");
+
+        // Only the network totals survive into the final render; the
+        // instantaneous stats and rates do not.
+        let final_render = component
+            .draw_unchecked(
+                Dimensions {
+                    width: 120,
+                    height: 10,
+                },
+                DrawMode::Final,
+            )?
+            .fmt_for_test()
+            .to_string();
+        assert_eq!(final_render, "Network: ↑ 10MiB ↓ 1.5GiB\n");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_slim_test_output() -> buck2_error::Result<()> {
+        async fn frame_after_test_results(
+            config: SuperConsoleConfig,
+            prefs: Option<buck2_data::ConsolePreferences>,
+            results: &[(String, buck2_data::TestStatus)],
+        ) -> buck2_error::Result<Vec<u8>> {
+            let trace_id = TraceId::new();
+            let now = SystemTime::now();
+            let tick = Tick::now();
+
+            let mut console = StatefulSuperConsole::new(
+                "test",
+                trace_id.dupe(),
+                test_console(),
+                Verbosity::default(),
+                true,
+                Timekeeper::new(
+                    Box::new(RealtimeClock),
+                    EventTimestamp(SystemTime::now().into()),
+                ),
+                config,
+                None,
+            )?;
+
+            if let Some(prefs) = prefs {
+                console
+                    .handle_event(&Arc::new(BuckEvent::new(
+                        now,
+                        trace_id.dupe(),
+                        None,
+                        None,
+                        buck2_data::InstantEvent {
+                            data: Some(prefs.into()),
+                        }
+                        .into(),
+                    )))
+                    .await?;
+            }
+
+            for (name, status) in results {
+                console
+                    .handle_event(&Arc::new(BuckEvent::new(
+                        now,
+                        trace_id.dupe(),
+                        None,
+                        None,
+                        buck2_data::InstantEvent {
+                            data: Some(
+                                buck2_data::TestResult {
+                                    name: name.to_owned(),
+                                    status: *status as i32,
+                                    ..Default::default()
+                                }
+                                .into(),
+                            ),
+                        }
+                        .into(),
+                    )))
+                    .await?;
+            }
+
+            console.tick(&tick).await?;
+
+            let frame = match &mut console {
+                StatefulSuperConsole::Running(c) => c
+                    .super_console
+                    .test_output_mut()
+                    .frames
+                    .pop()
+                    .ok_or_else(|| internal_error!("No frame was emitted"))?,
+                StatefulSuperConsole::Finalized(_) => {
+                    panic!("Console was downgraded");
+                }
+            };
+            Ok(frame)
+        }
+
+        let pass_fail = [
+            ("test_pass".to_owned(), buck2_data::TestStatus::Pass),
+            ("test_fail".to_owned(), buck2_data::TestStatus::Fail),
+        ];
+
+        // Default config is slim: passing tests show up only in the live
+        // finished-tests window, failures also emit a persistent line. Both are
+        // present in the rendered frame.
+        let frame = frame_after_test_results(Default::default(), None, &pass_fail).await?;
+        assert_frame_contains(&frame, "test_pass");
+        assert_frame_contains(&frame, "test_fail");
+
+        // The window is bounded by max_lines (default 10): with more finished
+        // tests than fit, only the most recent survive; older ones scroll out
+        // and — being passes — leave no scrollback line at all.
+        let many: Vec<_> = (0..14)
+            .map(|i| (format!("windowtest_{i:02}"), buck2_data::TestStatus::Pass))
+            .collect();
+        let frame = frame_after_test_results(Default::default(), None, &many).await?;
+        assert_frame_contains(&frame, "windowtest_13");
+        assert_frame_contains(&frame, "windowtest_06");
+        assert!(!frame_contains(&frame, "windowtest_05"));
+        assert!(!frame_contains(&frame, "windowtest_00"));
+
+        // Toggled off in config: no finished-tests window, so every result
+        // goes through the normal console output and gets a persistent line.
+        let frame = frame_after_test_results(
+            SuperConsoleConfig {
+                slim_test_output: false,
+                ..Default::default()
+            },
+            None,
+            &pass_fail,
+        )
+        .await?;
+        assert_frame_contains(&frame, "test_fail");
+        assert_frame_contains(&frame, "test_pass");
+
+        // Toggled off via a ConsolePreferences event (`[ui] slim_test_output`).
+        let frame = frame_after_test_results(
+            Default::default(),
+            Some(buck2_data::ConsolePreferences {
+                max_lines: None,
+                slim_test_output: Some(false),
+            }),
+            &pass_fail,
+        )
+        .await?;
+        assert_frame_contains(&frame, "test_fail");
+        assert_frame_contains(&frame, "test_pass");
 
         Ok(())
     }

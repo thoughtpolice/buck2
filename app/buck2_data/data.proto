@@ -1587,6 +1587,7 @@ enum ActionKind {
   WRITE = 5;
   WRITE_MACROS_TO_FILE = 6;
   CAS_ARTIFACT = 7;
+  REMOTE_ASSET = 8;
 }
 
 // The kinds of ways an action can be executed by buck2.
@@ -3277,7 +3278,10 @@ message DaemonShutdown {
 }
 
 message ConsolePreferences {
-  uint64 max_lines = 1;
+  optional uint64 max_lines = 1;
+  // Whether the superconsole should hide per-test scrollback lines for
+  // non-problem test results (`[ui] slim_test_output`).
+  optional bool slim_test_output = 2;
 }
 
 message SubscriptionCommandStart {}
