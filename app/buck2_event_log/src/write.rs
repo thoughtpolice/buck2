@@ -16,6 +16,7 @@ use std::time::SystemTime;
 
 use buck2_cli_proto::*;
 use buck2_common::argv::SanitizedArgv;
+use buck2_common::init::LogUploadMethod;
 use buck2_error::BuckErrorContext;
 use buck2_events::BuckEvent;
 use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
@@ -33,7 +34,6 @@ use crate::file_names::get_logfile_name;
 use crate::file_names::remove_old_logs;
 use crate::read::EventLogPathBuf;
 use crate::should_block_on_log_upload;
-use crate::should_upload_log;
 use crate::stream_value::StreamValue;
 use crate::user_event_types::try_get_user_event;
 use crate::utils::Encoding;
@@ -66,6 +66,7 @@ pub struct WriteEventLog {
     buf: Vec<u8>,
     log_size_counter_bytes: Option<Arc<AtomicU64>>,
     retained_event_logs: usize,
+    log_upload_method: LogUploadMethod,
 }
 
 impl WriteEventLog {
@@ -79,6 +80,7 @@ impl WriteEventLog {
         start_time: SystemTime,
         log_size_counter_bytes: Option<Arc<AtomicU64>>,
         retained_event_logs: usize,
+        log_upload_method: LogUploadMethod,
     ) -> Self {
         Self {
             state: LogWriterState::Unopened {
@@ -93,6 +95,7 @@ impl WriteEventLog {
             buf: Vec::new(),
             log_size_counter_bytes,
             retained_event_logs,
+            log_upload_method,
         }
     }
 
@@ -182,6 +185,7 @@ impl WriteEventLog {
             path,
             event.trace_id()?.clone(),
             self.log_size_counter_bytes.clone(),
+            &self.log_upload_method,
         )
         .await?;
         let mut writers = vec![writer];
@@ -257,6 +261,7 @@ async fn start_persist_event_log_subprocess(
     path: EventLogPathBuf,
     trace_id: TraceId,
     bytes_written: Option<Arc<AtomicU64>>,
+    log_upload_method: &LogUploadMethod,
 ) -> buck2_error::Result<NamedEventLogWriter> {
     let current_exe = std::env::current_exe().buck_error_context("No current_exe")?;
     let mut command = buck2_util::process::async_background_command(current_exe);
@@ -273,9 +278,17 @@ async fn start_persist_event_log_subprocess(
         .args(["--manifold-name", manifold_name])
         .args(["--local-path".as_ref(), path.path.as_os_str()])
         .args(["--trace-id", &trace_id.to_string()]);
-    if !should_upload_log()? {
-        command.arg("--no-upload");
-    };
+    match log_upload_method {
+        LogUploadMethod::Manifold => {}
+        LogUploadMethod::Command(cmd) => {
+            command.arg("--no-upload");
+            let expanded = cmd.replace("$TRACE_ID", &trace_id.to_string());
+            command.args(["--upload-cmd", &expanded]);
+        }
+        LogUploadMethod::None => {
+            command.arg("--no-upload");
+        }
+    }
     command.stdout(Stdio::null()).stdin(Stdio::piped());
 
     let block = should_block_on_log_upload()?;

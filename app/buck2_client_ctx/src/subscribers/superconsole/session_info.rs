@@ -10,6 +10,7 @@
 
 use std::iter;
 
+use buck2_event_observer::re_state::ReState;
 use buck2_event_observer::session_info::SessionInfo;
 use superconsole::Component;
 use superconsole::Dimensions;
@@ -21,6 +22,7 @@ use superconsole::Span;
 /// This component is used to display session information for a command e.g. RE session ID
 pub struct SessionInfoComponent<'s> {
     pub session_info: &'s SessionInfo,
+    pub re_state: &'s ReState,
 }
 
 impl Component for SessionInfoComponent<'_> {
@@ -46,6 +48,10 @@ impl Component for SessionInfoComponent<'_> {
         if let Some(buck2_data::TestSessionInfo { info, .. }) = &self.session_info.test_session {
             headers.push(Line::unstyled("Test UI:")?);
             ids.push(Span::new_unstyled(info)?);
+        }
+        if let Some(session_id) = &self.re_state.session_id {
+            headers.push(Line::unstyled("RE session:")?);
+            ids.push(Span::new_unstyled(session_id)?);
         }
         if self.session_info.legacy_dice {
             headers.push(Line::unstyled("Note:")?);
