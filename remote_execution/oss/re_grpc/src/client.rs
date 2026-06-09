@@ -39,6 +39,10 @@ use futures::stream::StreamExt;
 use futures::stream::TryStreamExt;
 use lru::LruCache;
 use prost::Message;
+use re_grpc_proto::build::bazel::remote::asset::v1::FetchBlobRequest;
+use re_grpc_proto::build::bazel::remote::asset::v1::FetchDirectoryRequest;
+use re_grpc_proto::build::bazel::remote::asset::v1::Qualifier;
+use re_grpc_proto::build::bazel::remote::asset::v1::fetch_client::FetchClient;
 use re_grpc_proto::build::bazel::remote::execution::v2::ActionResult;
 use re_grpc_proto::build::bazel::remote::execution::v2::BatchReadBlobsRequest;
 use re_grpc_proto::build::bazel::remote::execution::v2::BatchReadBlobsResponse;
@@ -105,6 +109,20 @@ use crate::response::*;
 
 const DEFAULT_MAX_TOTAL_BATCH_SIZE: usize = 4 * 1000 * 1000;
 
+/// tonic's limit on the size of a decoded message, for clients that don't set their own.
+const TONIC_DEFAULT_MAX_DECODING_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
+
+/// Metadata key used to send the RE session ID on every outbound request, so
+/// that server-side logs and L7 proxies can correlate requests with the
+/// session ID buck2 reports to the user (console, errors, invocation records).
+const RBE_SESSION_ID_HEADER: &str = "rbe-session-id";
+
+/// Metadata key used to send the per-invocation build ID alongside each
+/// request. Unlike `tool_invocation_id` inside the binary REAPI
+/// `RequestMetadata`, this is plain ASCII and thus visible to observability
+/// tools that don't decode REAPI protos.
+const RBE_BUILD_ID_HEADER: &str = "rbe-build-id";
+
 fn tdigest_to(tdigest: &TDigest) -> Digest {
     Digest {
         hash: tdigest.hash.clone(),
@@ -158,6 +176,14 @@ fn ttimestamp_from(ts: Option<::prost_types::Timestamp>) -> TTimestamp {
     }
 }
 
+fn ttimestamp_from_value(timestamp: ::prost_types::Timestamp) -> TTimestamp {
+    TTimestamp {
+        seconds: timestamp.seconds,
+        nanos: timestamp.nanos,
+        ..Default::default()
+    }
+}
+
 fn tany_to(any: &TAny) -> ::prost_types::Any {
     ::prost_types::Any {
         type_url: any.type_url.clone(),
@@ -172,6 +198,7 @@ fn tany_from(any: ::prost_types::Any) -> TAny {
         ..Default::default()
     }
 }
+
 
 /// Contains information queried from the Remote Execution Capabilities service.
 pub struct RECapabilities {
@@ -257,7 +284,10 @@ async fn zstd_decompress_blob(data: &[u8]) -> anyhow::Result<Vec<u8>> {
 pub struct REClientBuilder;
 
 impl REClientBuilder {
-    pub async fn build_and_connect(opts: &Buck2OssReConfiguration) -> anyhow::Result<REClient> {
+    pub async fn build_and_connect(
+        opts: &Buck2OssReConfiguration,
+        digest_function: i32,
+    ) -> anyhow::Result<REClient> {
         // Create channel config once (reads TLS files)
         let channel_config = ChannelConfig::new(opts)
             .await
@@ -269,7 +299,13 @@ impl REClientBuilder {
         let capabilities_channel = create_channel(&channel_config, engine_address)
             .context("Error creating Capabilities channel")?;
 
-        let interceptor = InjectHeadersInterceptor::new(&opts.http_headers)?;
+        // Unique ID for this client instantiation. The RE session spans every
+        // command that shares this client (the daemon drops it when idle), and
+        // the ID is both shown to the user and attached to every outbound
+        // request for correlation with server-side logs.
+        let session_id = uuid::Uuid::new_v4().to_string();
+
+        let interceptor = InjectHeadersInterceptor::new(&opts.http_headers, &session_id)?;
 
         let mut capabilities_client =
             CapabilitiesClient::with_interceptor(capabilities_channel, interceptor.dupe());
@@ -286,6 +322,7 @@ impl REClientBuilder {
                 &mut capabilities_client,
                 &instance_name,
                 opts.max_total_batch_size,
+                digest_function,
             )
             .await?
         } else {
@@ -295,9 +332,12 @@ impl REClientBuilder {
             }
         };
 
-        let max_decoding_msg_size = opts
-            .max_decoding_message_size
-            .unwrap_or(capabilities.max_total_batch_size * 2);
+        // Execute and GetActionResult responses share this limit, and their size has nothing to
+        // do with the batch size, so a small batch size mustn't pull the default below tonic's.
+        let max_decoding_msg_size = opts.max_decoding_message_size.unwrap_or(std::cmp::max(
+            capabilities.max_total_batch_size * 2,
+            TONIC_DEFAULT_MAX_DECODING_MESSAGE_SIZE,
+        ));
 
         if max_decoding_msg_size < capabilities.max_total_batch_size {
             return Err(anyhow::anyhow!(
@@ -363,6 +403,8 @@ impl REClientBuilder {
             cas_address,
             engine_address.clone(),
             action_cache_address,
+            session_id,
+            digest_function,
         ))
     }
 
@@ -370,9 +412,8 @@ impl REClientBuilder {
         client: &mut CapabilitiesClient<InterceptedService<Channel, InjectHeadersInterceptor>>,
         instance_name: &InstanceName,
         max_total_batch_size: Option<usize>,
+        digest_function: i32,
     ) -> anyhow::Result<RECapabilities> {
-        // TODO use more of the capabilities of the remote build executor
-
         let resp = client
             .get_capabilities(GetCapabilitiesRequest {
                 instance_name: instance_name.as_str().to_owned(),
@@ -383,6 +424,18 @@ impl REClientBuilder {
             .into_inner();
 
         let supported_compressors = if let Some(cache_cap) = &resp.cache_capabilities {
+            // Validate that the server supports our configured digest function.
+            if !cache_cap.digest_functions.is_empty()
+                && !cache_cap.digest_functions.contains(&digest_function)
+            {
+                return Err(anyhow::anyhow!(
+                    "Remote execution server does not support digest function {} \
+                     (server supports: {:?})",
+                    digest_function,
+                    cache_cap.digest_functions
+                ));
+            }
+
             cache_cap
                 .supported_compressors
                 .iter()
@@ -423,8 +476,8 @@ struct InjectHeadersInterceptor {
 }
 
 impl InjectHeadersInterceptor {
-    pub fn new(headers: &[HttpHeader]) -> anyhow::Result<Self> {
-        let headers = headers
+    pub fn new(headers: &[HttpHeader], session_id: &str) -> anyhow::Result<Self> {
+        let mut headers: Vec<_> = headers
             .iter()
             .map(|h| {
                 // This means we can't have `$` in a header key or value, which isn't great. On the
@@ -443,6 +496,17 @@ impl InjectHeadersInterceptor {
             })
             .collect::<Result<_, _>>()
             .context("Error converting headers")?;
+
+        // A user-configured header with the same key takes precedence.
+        if !headers
+            .iter()
+            .any(|(k, _)| k.as_str() == RBE_SESSION_ID_HEADER)
+        {
+            headers.push((
+                MetadataKey::from_static(RBE_SESSION_ID_HEADER),
+                MetadataValue::try_from(session_id).context("Invalid session ID")?,
+            ));
+        }
 
         Ok(Self {
             headers: Arc::new(headers),
@@ -510,6 +574,23 @@ pub struct REClient {
     cas_address: String,
     engine_address: String,
     action_cache_address: String,
+    /// Unique UUID for this client instantiation, shown to the user and sent
+    /// to the server on every request.
+    session_id: String,
+    /// Proto `DigestFunction.Value` as `i32` (e.g. 1=SHA256, 2=SHA1, 9=BLAKE3).
+    digest_function: i32,
+    /// Resource name component for bytestream paths, e.g. `Some("blake3")` or `None`.
+    digest_function_resource_name: Option<String>,
+}
+
+/// Map a proto `DigestFunction.Value` to the resource name component that must
+/// appear in ByteStream paths, or `None` when the spec says to omit it.
+fn digest_function_to_resource_name(digest_function: i32) -> Option<String> {
+    match digest_function {
+        9 => Some("blake3".to_owned()),
+        8 => Some("sha256tree".to_owned()),
+        _ => None,
+    }
 }
 
 impl Drop for REClient {
@@ -715,12 +796,13 @@ async fn execution_client_for(
     pool: &ChannelPool,
     engine_address: &str,
     interceptor: &InjectHeadersInterceptor,
+    max_decoding_msg_size: usize,
 ) -> anyhow::Result<ExecutionClient<GrpcService>> {
     let channel = pool.get(engine_address).await?;
-    Ok(ExecutionClient::new(InterceptedService::new(
-        channel,
-        interceptor.dupe(),
-    )))
+    Ok(
+        ExecutionClient::new(InterceptedService::new(channel, interceptor.dupe()))
+            .max_decoding_message_size(max_decoding_msg_size),
+    )
 }
 
 /// Resumes that report nothing before the stream is treated as broken.
@@ -970,8 +1052,11 @@ impl REClient {
         cas_address: String,
         engine_address: String,
         action_cache_address: String,
+        session_id: String,
+        digest_function: i32,
     ) -> Self {
         let cas_ttl_secs = runtime_opts.cas_ttl_secs;
+        let digest_function_resource_name = digest_function_to_resource_name(digest_function);
         REClient {
             runtime_opts,
             pool: Arc::new(pool),
@@ -988,6 +1073,9 @@ impl REClient {
             cas_address,
             engine_address,
             action_cache_address,
+            session_id,
+            digest_function,
+            digest_function_resource_name,
         }
     }
 
@@ -997,9 +1085,14 @@ impl REClient {
         request: ActionResultRequest,
     ) -> impl Future<Output = anyhow::Result<ActionResultResponse>> + Send + use<'a> {
         let action_digest = tdigest_to(&request.digest);
-        let headers = with_re_metadata((), metadata, self.runtime_opts.use_fbcode_metadata)
-            .into_parts()
-            .0;
+        let headers = with_re_metadata(
+            (),
+            metadata,
+            self.runtime_opts.use_fbcode_metadata,
+            &self.session_id,
+        )
+        .into_parts()
+        .0;
         async move {
             retry(|| async {
                 let res = self
@@ -1011,6 +1104,7 @@ impl REClient {
                         GetActionResultRequest {
                             instance_name: self.instance_name.as_str().to_owned(),
                             action_digest: Some(action_digest.clone()),
+                            digest_function: self.digest_function,
                             ..Default::default()
                         },
                     ))
@@ -1035,9 +1129,14 @@ impl REClient {
     ) -> impl Future<Output = anyhow::Result<WriteActionResultResponse>> + Send + use<'a> {
         let action_result = convert_t_action_result2(&request.action_result);
         let action_digest = request.action_digest.clone();
-        let headers = with_re_metadata((), metadata, self.runtime_opts.use_fbcode_metadata)
-            .into_parts()
-            .0;
+        let headers = with_re_metadata(
+            (),
+            metadata,
+            self.runtime_opts.use_fbcode_metadata,
+            &self.session_id,
+        )
+        .into_parts()
+        .0;
         async move {
             let action_result = action_result?;
             retry(|| async {
@@ -1052,6 +1151,7 @@ impl REClient {
                             action_digest: Some(tdigest_to(&action_digest)),
                             action_result: Some(action_result.clone()),
                             results_cache_policy: None,
+                            digest_function: self.digest_function,
                             ..Default::default()
                         },
                     ))
@@ -1067,6 +1167,93 @@ impl REClient {
             })
             .await
         }
+    }
+
+    pub async fn fetch_remote_asset(
+        &self,
+        metadata: RemoteExecutionMetadata,
+        request: RemoteAssetRequest,
+    ) -> anyhow::Result<RemoteAssetResponse> {
+        let qualifiers = request
+            .qualifiers
+            .iter()
+            .map(|qualifier| Qualifier {
+                name: qualifier.name.clone(),
+                value: qualifier.value.clone(),
+            })
+            .collect::<Vec<_>>();
+        let timeout = request
+            .timeout_seconds
+            .map(|seconds| prost_types::Duration {
+                seconds: seconds.try_into().unwrap_or(i64::MAX),
+                nanos: 0,
+            });
+
+        retry(|| async {
+            match request.kind {
+                RemoteAssetKind::Blob => {
+                    let response = self
+                        .remote_asset_client()
+                        .await?
+                        .fetch_blob(with_re_metadata(
+                            FetchBlobRequest {
+                                instance_name: self.instance_name.as_str().to_owned(),
+                                timeout,
+                                oldest_content_accepted: None,
+                                uris: request.uris.clone(),
+                                qualifiers: qualifiers.clone(),
+                                digest_function: request.digest_function,
+                            },
+                            &metadata,
+                            self.runtime_opts.use_fbcode_metadata,
+                            &self.session_id,
+                        ))
+                        .await?
+                        .into_inner();
+
+                    check_status(response.status.unwrap_or_default())?;
+                    let digest = response
+                        .blob_digest
+                        .context("Remote Asset FetchBlob response did not contain a digest")?;
+                    Ok(RemoteAssetResponse {
+                        digest: tdigest_from(digest),
+                        expires_at: response.expires_at.map(ttimestamp_from_value),
+                        digest_function: response.digest_function,
+                    })
+                }
+                RemoteAssetKind::Directory => {
+                    let response = self
+                        .remote_asset_client()
+                        .await?
+                        .fetch_directory(with_re_metadata(
+                            FetchDirectoryRequest {
+                                instance_name: self.instance_name.as_str().to_owned(),
+                                timeout,
+                                oldest_content_accepted: None,
+                                uris: request.uris.clone(),
+                                qualifiers: qualifiers.clone(),
+                                digest_function: request.digest_function,
+                            },
+                            &metadata,
+                            self.runtime_opts.use_fbcode_metadata,
+                            &self.session_id,
+                        ))
+                        .await?
+                        .into_inner();
+
+                    check_status(response.status.unwrap_or_default())?;
+                    let digest = response.root_directory_digest.context(
+                        "Remote Asset FetchDirectory response did not contain a root directory digest",
+                    )?;
+                    Ok(RemoteAssetResponse {
+                        digest: tdigest_from(digest),
+                        expires_at: response.expires_at.map(ttimestamp_from_value),
+                        digest_function: response.digest_function,
+                    })
+                }
+            }
+        })
+        .await
     }
 
     pub async fn execute_with_progress(
@@ -1087,12 +1274,15 @@ impl REClient {
         let interceptor = self.interceptor.dupe();
         let engine_address = self.engine_address.clone();
         let use_fbcode_metadata = self.runtime_opts.use_fbcode_metadata;
+        let session_id = self.session_id.clone();
+        let max_decoding_msg_size = self.max_decoding_msg_size;
         let request = GExecuteRequest {
             instance_name: self.instance_name.as_str().to_owned(),
             skip_cache_lookup: execute_request.skip_cache_lookup,
             execution_policy: Some(ExecutionPolicy { priority }),
             results_cache_policy: Some(ResultsCachePolicy { priority: 0 }),
             action_digest: Some(action_digest),
+            digest_function: self.digest_function,
             ..Default::default()
         };
 
@@ -1103,9 +1293,16 @@ impl REClient {
             let engine_address = engine_address.clone();
             let metadata = owned_metadata.clone();
             let request = request.clone();
+            let session_id = session_id.clone();
 
             async move {
-                let mut client = execution_client_for(&pool, &engine_address, &interceptor).await?;
+                let mut client = execution_client_for(
+                    &pool,
+                    &engine_address,
+                    &interceptor,
+                    max_decoding_msg_size,
+                )
+                .await?;
 
                 let stream = match resume {
                     Some(name) => client
@@ -1113,11 +1310,17 @@ impl REClient {
                             WaitExecutionRequest { name },
                             &metadata,
                             use_fbcode_metadata,
+                            &session_id,
                         ))
                         .await?
                         .into_inner(),
                     None => client
-                        .execute(with_re_metadata(request, &metadata, use_fbcode_metadata))
+                        .execute(with_re_metadata(
+                            request,
+                            &metadata,
+                            use_fbcode_metadata,
+                            &session_id,
+                        ))
                         .await?
                         .into_inner(),
                 };
@@ -1154,9 +1357,14 @@ impl REClient {
         metadata: &RemoteExecutionMetadata,
         request: UploadRequest,
     ) -> impl Future<Output = anyhow::Result<UploadResponse>> + Send + use<'a> {
-        let headers = with_re_metadata((), metadata, self.runtime_opts.use_fbcode_metadata)
-            .into_parts()
-            .0;
+        let headers = with_re_metadata(
+            (),
+            metadata,
+            self.runtime_opts.use_fbcode_metadata,
+            &self.session_id,
+        )
+        .into_parts()
+        .0;
         async move {
             upload_impl(
                 &self.instance_name,
@@ -1164,6 +1372,8 @@ impl REClient {
                 self.bystream_compressor,
                 self.capabilities.max_total_batch_size,
                 self.runtime_opts.max_concurrent_uploads_per_action,
+                self.digest_function,
+                self.digest_function_resource_name.as_deref(),
                 |re_request| {
                     let headers = headers.clone();
                     async move {
@@ -1231,9 +1441,14 @@ impl REClient {
         metadata: &RemoteExecutionMetadata,
         request: DownloadRequest,
     ) -> impl Future<Output = anyhow::Result<DownloadResponse>> + Send + use<'a> {
-        let headers = with_re_metadata((), metadata, self.runtime_opts.use_fbcode_metadata)
-            .into_parts()
-            .0;
+        let headers = with_re_metadata(
+            (),
+            metadata,
+            self.runtime_opts.use_fbcode_metadata,
+            &self.session_id,
+        )
+        .into_parts()
+        .0;
         async move {
             download_impl(
                 &self.runtime_opts,
@@ -1241,6 +1456,8 @@ impl REClient {
                 request,
                 self.bystream_compressor,
                 self.capabilities.max_total_batch_size,
+                self.digest_function,
+                self.digest_function_resource_name.as_deref(),
                 |re_request| {
                     let headers = headers.clone();
                     async move {
@@ -1318,10 +1535,12 @@ impl REClient {
                             FindMissingBlobsRequest {
                                 instance_name: self.instance_name.as_str().to_owned(),
                                 blob_digests: blob_digests.clone(),
+                                digest_function: self.digest_function,
                                 ..Default::default()
                             },
                             metadata,
                             self.runtime_opts.use_fbcode_metadata,
+                            &self.session_id,
                         ))
                         .await
                         .context("Failed to request what blobs are not present on remote")?;
@@ -1415,10 +1634,18 @@ impl REClient {
 
     async fn action_cache_client(&self) -> anyhow::Result<ActionCacheClient<GrpcService>> {
         let channel = self.pool.get(&self.action_cache_address).await?;
-        Ok(ActionCacheClient::new(InterceptedService::new(
-            channel,
-            self.interceptor.dupe(),
-        )))
+        Ok(
+            ActionCacheClient::new(InterceptedService::new(channel, self.interceptor.dupe()))
+                .max_decoding_message_size(self.max_decoding_msg_size),
+        )
+    }
+
+    async fn remote_asset_client(&self) -> anyhow::Result<FetchClient<GrpcService>> {
+        let channel = self.pool.get(&self.cas_address).await?;
+        Ok(
+            FetchClient::new(InterceptedService::new(channel, self.interceptor.dupe()))
+                .max_decoding_message_size(self.max_decoding_msg_size),
+        )
     }
 
     pub fn get_metrics_client(&self) -> &Self {
@@ -1426,8 +1653,7 @@ impl REClient {
     }
 
     pub fn get_session_id(&self) -> &str {
-        // TODO(aloiscochard): Return a unique ID, ideally from the GRPC client
-        "GRPC-SESSION-ID"
+        &self.session_id
     }
 
     pub fn get_experiment_name(&self) -> anyhow::Result<Option<String>> {
@@ -1649,6 +1875,8 @@ async fn download_impl<Byt, BytRet, Cas>(
     request: DownloadRequest,
     bystream_compressor: Option<Compressor>,
     max_total_batch_size: usize,
+    digest_function: i32,
+    digest_fn_name: Option<&str>,
     cas_f: impl Fn(BatchReadBlobsRequest) -> Cas,
     bystream_fut: impl Fn(ReadRequest) -> Byt + Sync + Send + Copy,
 ) -> anyhow::Result<DownloadResponse>
@@ -1661,19 +1889,25 @@ where
         instance_name: &InstanceName,
         compressor: Option<Compressor>,
         digest: &TDigest,
+        digest_fn_name: Option<&str>,
     ) -> String {
+        let df = digest_fn_name
+            .map(|n| format!("{n}/"))
+            .unwrap_or_default();
         if let Some(compressor) = compressor {
             format!(
-                "{}compressed-blobs/{}/{}/{}",
+                "{}compressed-blobs/{}/{}{}/{}",
                 instance_name.as_resource_prefix(),
                 compressor.name(),
+                df,
                 digest.hash,
                 digest.size_in_bytes,
             )
         } else {
             format!(
-                "{}blobs/{}/{}",
+                "{}blobs/{}{}/{}",
                 instance_name.as_resource_prefix(),
+                df,
                 digest.hash,
                 digest.size_in_bytes,
             )
@@ -1681,7 +1915,7 @@ where
     }
 
     let bystream_fut = |digest: TDigest| async move {
-        let resource_name = resource_name(instance_name, bystream_compressor, &digest);
+        let resource_name = resource_name(instance_name, bystream_compressor, &digest, digest_fn_name);
 
         bystream_fut(ReadRequest {
             resource_name: resource_name.clone(),
@@ -1753,6 +1987,7 @@ where
                 instance_name: instance_name.as_str().to_owned(),
                 digests: std::mem::take(&mut curr_digests),
                 acceptable_compressors: acceptable_compressors.clone(),
+                digest_function,
                 ..Default::default()
             };
             requests.push(read_blob_req);
@@ -1766,6 +2001,7 @@ where
             instance_name: instance_name.as_str().to_owned(),
             digests: std::mem::take(&mut curr_digests),
             acceptable_compressors: acceptable_compressors.clone(),
+            digest_function,
             ..Default::default()
         };
         requests.push(read_blob_req);
@@ -1891,6 +2127,8 @@ async fn upload_impl<Byt, Cas>(
     bystream_compressor: Option<Compressor>,
     max_total_batch_size: usize,
     max_concurrent_uploads: Option<usize>,
+    digest_function: i32,
+    digest_fn_name: Option<&str>,
     cas_f: impl Fn(BatchUpdateBlobsRequest) -> Cas + Sync + Send + Copy,
     bystream_fut: impl Fn(Vec<WriteRequest>) -> Byt + Sync + Send + Copy,
 ) -> anyhow::Result<UploadResponse>
@@ -1903,21 +2141,27 @@ where
         client_uuid: &str,
         compressor: Option<Compressor>,
         digest: &TDigest,
+        digest_fn_name: Option<&str>,
     ) -> String {
+        let df = digest_fn_name
+            .map(|n| format!("{n}/"))
+            .unwrap_or_default();
         if let Some(compressor) = compressor {
             format!(
-                "{}uploads/{}/compressed-blobs/{}/{}/{}",
+                "{}uploads/{}/compressed-blobs/{}/{}{}/{}",
                 instance_name.as_resource_prefix(),
                 client_uuid,
                 compressor.name(),
+                df,
                 digest.hash,
                 digest.size_in_bytes,
             )
         } else {
             format!(
-                "{}uploads/{}/blobs/{}/{}",
+                "{}uploads/{}/blobs/{}{}/{}",
                 instance_name.as_resource_prefix(),
                 client_uuid,
+                df,
                 digest.hash,
                 digest.size_in_bytes,
             )
@@ -1992,6 +2236,7 @@ where
             &client_uuid,
             bystream_compressor,
             &blob.digest,
+            digest_fn_name,
         );
         let fut = async move {
             retry(|| async {
@@ -2018,6 +2263,7 @@ where
             &client_uuid,
             bystream_compressor,
             &file.digest,
+            digest_fn_name,
         );
 
         let fut = async move {
@@ -2042,6 +2288,7 @@ where
             let mut re_request = BatchUpdateBlobsRequest {
                 instance_name: instance_name.as_str().to_owned(),
                 requests: vec![],
+                digest_function,
                 ..Default::default()
             };
             for blob in batch {
@@ -2120,6 +2367,7 @@ fn with_re_metadata<T>(
     t: T,
     metadata: &RemoteExecutionMetadata,
     use_fbcode_metadata: bool,
+    session_id: &str,
 ) -> tonic::Request<T> {
     // This creates a new Tonic request with attached metadata for the RE
     // backend. There are two cases here we need to support:
@@ -2139,6 +2387,8 @@ fn with_re_metadata<T>(
     // could test the OSS Bazel API in the upstream GitHub CI, but doing it this
     // way is only a little ugly, it's hidden, and it helps ensure the internal
     // Meta builds catch those issues earlier.
+
+    let buck_info = metadata.buck_info.clone().unwrap_or_default();
 
     let mut msg = tonic::Request::new(t);
 
@@ -2173,15 +2423,20 @@ fn with_re_metadata<T>(
         RequestMetadata {
             tool_details: Some(ToolDetails {
                 tool_name: "buck2".to_owned(),
-                // TODO(#503): Pull the BuckVersion::get_unique_id() from BuckDaemon
-                tool_version: "0.1.0".to_owned(),
+                tool_version: if buck_info.version.is_empty() {
+                    // TODO(#503): Pull the BuckVersion::get_unique_id() from BuckDaemon
+                    "0.1.0".to_owned()
+                } else {
+                    buck_info.version.clone()
+                },
             }),
             action_id: "".to_owned(),
-            tool_invocation_id: metadata
-                .buck_info
-                .as_ref()
-                .map_or(String::new(), |buck_info| buck_info.build_id.clone()),
-            correlated_invocations_id: "".to_owned(),
+            tool_invocation_id: buck_info.build_id.clone(),
+            // There is no exact REAPI equivalent of an RE session (one client
+            // instantiation serving several invocations), but this field's
+            // purpose — tying multiple tool invocations together — is the
+            // closest match, and REAPI-aware servers index it natively.
+            correlated_invocations_id: session_id.to_owned(),
             action_mnemonic: "".to_owned(),
             target_id: "".to_owned(),
             configuration_id: "".to_owned(),
@@ -2194,6 +2449,19 @@ fn with_re_metadata<T>(
             MetadataValue::from_bytes(&encoded),
         );
     };
+
+    // Also send the build ID as a plain ASCII header: unlike the binary proto
+    // metadata above, any proxy or access log can index it without decoding
+    // REAPI protos. The session ID counterpart is attached to every request by
+    // `InjectHeadersInterceptor`. Skipped when the value cannot be represented
+    // as an ASCII metadata value; note the interceptor runs after this and
+    // overwrites same-named keys, so user-configured headers win here too.
+    if !buck_info.build_id.is_empty() {
+        if let Ok(value) = MetadataValue::try_from(&buck_info.build_id) {
+            msg.metadata_mut().insert(RBE_BUILD_ID_HEADER, value);
+        }
+    }
+
     msg
 }
 
@@ -2233,9 +2501,25 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::atomic::AtomicU16;
 
+    use buck2_re_configuration::Buck2OssReConfiguration;
     use futures::FutureExt;
+    use re_grpc_proto::build::bazel::remote::asset::v1::FetchBlobResponse;
+    use re_grpc_proto::build::bazel::remote::asset::v1::FetchDirectoryResponse;
+    use re_grpc_proto::build::bazel::remote::asset::v1::fetch_server;
+    use re_grpc_proto::build::bazel::remote::asset::v1::fetch_server::FetchServer;
+    use re_grpc_proto::build::bazel::remote::execution::v2::CacheCapabilities;
+    use re_grpc_proto::build::bazel::remote::execution::v2::ServerCapabilities;
+    use re_grpc_proto::build::bazel::remote::execution::v2::WaitExecutionRequest;
+    use re_grpc_proto::build::bazel::remote::execution::v2::action_cache_server;
+    use re_grpc_proto::build::bazel::remote::execution::v2::action_cache_server::ActionCacheServer;
     use re_grpc_proto::build::bazel::remote::execution::v2::batch_read_blobs_response;
     use re_grpc_proto::build::bazel::remote::execution::v2::batch_update_blobs_response;
+    use re_grpc_proto::build::bazel::remote::execution::v2::capabilities_server;
+    use re_grpc_proto::build::bazel::remote::execution::v2::capabilities_server::CapabilitiesServer;
+    use re_grpc_proto::build::bazel::remote::execution::v2::execution_server;
+    use re_grpc_proto::build::bazel::remote::execution::v2::execution_server::ExecutionServer;
+    use re_grpc_proto::google::longrunning::Operation;
+    use tonic::transport::Server;
 
     use super::*;
 
@@ -2673,6 +2957,227 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct TestRemoteAssetService;
+
+    fn ok_status() -> Status {
+        Status {
+            code: Code::Ok as i32,
+            ..Default::default()
+        }
+    }
+
+    #[tonic::async_trait]
+    impl fetch_server::Fetch for TestRemoteAssetService {
+        async fn fetch_blob(
+            &self,
+            request: tonic::Request<FetchBlobRequest>,
+        ) -> Result<tonic::Response<FetchBlobResponse>, tonic::Status> {
+            let request = request.into_inner();
+            if request.instance_name != "test-instance"
+                || request.digest_function != 1
+                || request.timeout.as_ref().map(|timeout| timeout.seconds) != Some(7)
+                || request.qualifiers
+                    != vec![Qualifier {
+                        name: "checksum.sri".to_owned(),
+                        value: "sha256-test".to_owned(),
+                    }]
+            {
+                return Err(tonic::Status::invalid_argument(
+                    "unexpected FetchBlob request",
+                ));
+            }
+
+            match request.uris.first().map(String::as_str) {
+                Some("inline-error") => Ok(tonic::Response::new(FetchBlobResponse {
+                    status: Some(Status {
+                        code: Code::InvalidArgument as i32,
+                        message: "bad asset".to_owned(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })),
+                Some("missing-digest") => Ok(tonic::Response::new(FetchBlobResponse {
+                    status: Some(ok_status()),
+                    digest_function: 1,
+                    ..Default::default()
+                })),
+                // Bigger than tonic's default decoding limit (4 MiB).
+                Some("large-response") => Ok(tonic::Response::new(FetchBlobResponse {
+                    status: Some(ok_status()),
+                    uri: "x".repeat(5 * 1024 * 1024),
+                    blob_digest: Some(Digest {
+                        hash: "a".repeat(64),
+                        size_bytes: 42,
+                    }),
+                    digest_function: 1,
+                    ..Default::default()
+                })),
+                _ => Ok(tonic::Response::new(FetchBlobResponse {
+                    status: Some(ok_status()),
+                    uri: request.uris[0].clone(),
+                    expires_at: Some(prost_types::Timestamp {
+                        seconds: 123,
+                        nanos: 456,
+                    }),
+                    blob_digest: Some(Digest {
+                        hash: "a".repeat(64),
+                        size_bytes: 42,
+                    }),
+                    digest_function: 1,
+                    ..Default::default()
+                })),
+            }
+        }
+
+        async fn fetch_directory(
+            &self,
+            request: tonic::Request<FetchDirectoryRequest>,
+        ) -> Result<tonic::Response<FetchDirectoryResponse>, tonic::Status> {
+            let request = request.into_inner();
+            if request.instance_name != "test-instance"
+                || request.uris != ["https://example.com/repo.git"]
+                || request.digest_function != 9
+            {
+                return Err(tonic::Status::invalid_argument(
+                    "unexpected FetchDirectory request",
+                ));
+            }
+            Ok(tonic::Response::new(FetchDirectoryResponse {
+                status: Some(ok_status()),
+                uri: request.uris[0].clone(),
+                root_directory_digest: Some(Digest {
+                    hash: "b".repeat(64),
+                    size_bytes: 84,
+                }),
+                digest_function: 9,
+                ..Default::default()
+            }))
+        }
+    }
+
+    async fn remote_asset_test_client() -> anyhow::Result<(REClient, tokio::task::JoinHandle<()>)> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?.to_string();
+        let incoming = futures::stream::unfold(listener, |listener| async move {
+            let item = listener.accept().await.map(|(stream, _)| stream);
+            Some((item, listener))
+        });
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_service(FetchServer::new(TestRemoteAssetService))
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        let client = REClientBuilder::build_and_connect(
+            &Buck2OssReConfiguration {
+                cas_address: Some(address.clone()),
+                engine_address: Some(address.clone()),
+                action_cache_address: Some(address),
+                tls: false,
+                capabilities: Some(false),
+                instance_name: Some("test-instance".to_owned()),
+                ..Default::default()
+            },
+            1,
+        )
+        .await?;
+        Ok((client, server))
+    }
+
+    fn blob_asset_request(uri: &str) -> RemoteAssetRequest {
+        RemoteAssetRequest {
+            kind: RemoteAssetKind::Blob,
+            uris: vec![uri.to_owned()],
+            qualifiers: vec![RemoteAssetQualifier {
+                name: "checksum.sri".to_owned(),
+                value: "sha256-test".to_owned(),
+            }],
+            digest_function: 1,
+            timeout_seconds: Some(7),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_remote_asset_fetch() -> anyhow::Result<()> {
+        let (client, server) = remote_asset_test_client().await?;
+
+        let blob = client
+            .fetch_remote_asset(
+                RemoteExecutionMetadata::default(),
+                blob_asset_request("blob"),
+            )
+            .await?;
+        assert_eq!(blob.digest.hash, "a".repeat(64));
+        assert_eq!(blob.digest.size_in_bytes, 42);
+        assert_eq!(blob.digest_function, 1);
+        assert_eq!(blob.expires_at.unwrap().seconds, 123);
+
+        let directory = client
+            .fetch_remote_asset(
+                RemoteExecutionMetadata::default(),
+                RemoteAssetRequest {
+                    kind: RemoteAssetKind::Directory,
+                    uris: vec!["https://example.com/repo.git".to_owned()],
+                    qualifiers: vec![],
+                    digest_function: 9,
+                    timeout_seconds: None,
+                },
+            )
+            .await?;
+        assert_eq!(directory.digest.hash, "b".repeat(64));
+        assert_eq!(directory.digest.size_in_bytes, 84);
+        assert_eq!(directory.digest_function, 9);
+
+        let inline_error = client
+            .fetch_remote_asset(
+                RemoteExecutionMetadata::default(),
+                blob_asset_request("inline-error"),
+            )
+            .await;
+        let inline_error = match inline_error {
+            Ok(_) => panic!("inline Remote Asset error unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert!(inline_error.to_string().contains("bad asset"));
+
+        let missing_digest = client
+            .fetch_remote_asset(
+                RemoteExecutionMetadata::default(),
+                blob_asset_request("missing-digest"),
+            )
+            .await;
+        let missing_digest = match missing_digest {
+            Ok(_) => panic!("Remote Asset response without a digest unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert!(
+            missing_digest
+                .to_string()
+                .contains("did not contain a digest")
+        );
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_remote_asset_fetch_larger_than_tonic_default() -> anyhow::Result<()> {
+        let (client, server) = remote_asset_test_client().await?;
+
+        let blob = client
+            .fetch_remote_asset(
+                RemoteExecutionMetadata::default(),
+                blob_asset_request("large-response"),
+            )
+            .await?;
+        assert_eq!(blob.digest.hash, "a".repeat(64));
+
+        server.abort();
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_retry_unauthenticated() {
         let attempts = AtomicU16::new(0);
@@ -2820,6 +3325,8 @@ mod tests {
             req,
             None,
             10000,
+            1,
+            None,
             |req| {
                 let res = res.clone();
                 let digest1 = digest1.clone();
@@ -2928,6 +3435,8 @@ mod tests {
             req,
             None,
             10, // kept small to simulate a large file download
+            1,
+            None,
             |req| {
                 let res = res.clone();
                 let digest1 = digest1.clone();
@@ -3011,6 +3520,8 @@ mod tests {
             req,
             None,
             100000,
+            1,
+            None,
             |req| {
                 let res = res.clone();
                 let digest1 = digest1.clone();
@@ -3099,6 +3610,8 @@ mod tests {
             req,
             None,
             7,
+            1,
+            None,
             |req| {
                 counter.fetch_add(1, Ordering::Relaxed);
                 let res = BatchReadBlobsResponse {
@@ -3173,6 +3686,8 @@ mod tests {
             req,
             None,
             10, // intentionally small value to keep data in the test blobs small
+            1,
+            None,
             |req| {
                 let res = res.clone();
                 let digest1 = digest1.clone();
@@ -3230,6 +3745,8 @@ mod tests {
             req,
             None,
             100000,
+            1,
+            None,
             |req| {
                 let res = res.clone();
                 async move {
@@ -3270,6 +3787,8 @@ mod tests {
             req,
             None,
             0,
+            1,
+            None,
             |_req| async { panic!("not called") },
             |req| async move {
                 assert_eq!(req.resource_name, "instance/blobs/aa/0");
@@ -3341,6 +3860,8 @@ mod tests {
             None,
             10000,
             None,
+            1,
+            None,
             |req| {
                 let res = res.clone();
                 let digest1 = digest1.clone();
@@ -3401,6 +3922,8 @@ mod tests {
             req,
             None,
             10000,
+            1,
+            None,
             |req| {
                 let res = res.clone();
                 async move {
@@ -3484,6 +4007,8 @@ mod tests {
             None,
             10, // kept small to simulate a large file upload
             None,
+            1,
+            None,
             |req| {
                 let res = res.clone();
                 let digest1 = digest1.clone();
@@ -3559,6 +4084,8 @@ mod tests {
             None,
             10, // kept small to simulate a large inlined upload
             None,
+            1,
+            None,
             |req| {
                 let res = res.clone();
                 let digest1 = digest1.clone();
@@ -3620,6 +4147,8 @@ mod tests {
             req,
             None,
             10,
+            None,
+            1,
             None,
             |_req| async move {
                 panic!("This should not be called as there are no blobs to upload in batch");
@@ -3683,6 +4212,8 @@ mod tests {
             None,
             3,
             None,
+            1,
+            None,
             |_req| async move {
                 panic!("Not called");
             },
@@ -3730,6 +4261,8 @@ mod tests {
                     compressor,
                     0, // max_total_batch_size=0 forces bytestream API
                     None,
+                    1,
+                    None,
                     |_req| async move {
                         panic!("Not called");
                     },
@@ -3754,6 +4287,8 @@ mod tests {
                     },
                     compressor,
                     1024, // forces the batch API
+                    None,
+                    1,
                     None,
                     |_req| async move {
                         panic!("Not called");
@@ -3799,6 +4334,8 @@ mod tests {
         upload_impl(
             &InstanceName(Some("instance".to_owned())),
             req,
+            None,
+            1,
             None,
             1,
             None,
@@ -3849,6 +4386,8 @@ mod tests {
             Some(Compressor::Zstd),
             1,
             None,
+            1,
+            None,
             |_req| async move {
                 panic!("Not called");
             },
@@ -3892,6 +4431,313 @@ mod tests {
         assert_eq!(substitute_env_vars_impl("FOO", getter).unwrap(), "FOO");
         assert!(substitute_env_vars_impl("$FOO$BAZ", getter).is_err());
     }
+
+    fn decode_request_metadata<T>(request: &tonic::Request<T>) -> RequestMetadata {
+        let bytes = request
+            .metadata()
+            .get_bin("build.bazel.remote.execution.v2.requestmetadata-bin")
+            .expect("missing REAPI request metadata")
+            .to_bytes()
+            .unwrap();
+        RequestMetadata::decode(bytes.as_ref()).unwrap()
+    }
+
+    #[test]
+    fn test_with_re_metadata_correlation_ids() {
+        let metadata = RemoteExecutionMetadata {
+            buck_info: Some(BuckInfo {
+                build_id: "some-build-id".to_owned(),
+                version: "some-version".to_owned(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let request = with_re_metadata((), &metadata, false, "test-session-id");
+
+        let build_id_header = request.metadata().get(RBE_BUILD_ID_HEADER).unwrap();
+        assert_eq!(build_id_header.to_str().unwrap(), "some-build-id");
+
+        let decoded = decode_request_metadata(&request);
+        assert_eq!(decoded.tool_invocation_id, "some-build-id");
+        assert_eq!(decoded.correlated_invocations_id, "test-session-id");
+        assert_eq!(decoded.tool_details.unwrap().tool_version, "some-version");
+    }
+
+    #[test]
+    fn test_with_re_metadata_without_buck_info() {
+        let request = with_re_metadata(
+            (),
+            &RemoteExecutionMetadata::default(),
+            false,
+            "test-session-id",
+        );
+
+        assert!(request.metadata().get(RBE_BUILD_ID_HEADER).is_none());
+
+        let decoded = decode_request_metadata(&request);
+        assert_eq!(decoded.tool_invocation_id, "");
+        assert_eq!(decoded.correlated_invocations_id, "test-session-id");
+        assert_eq!(decoded.tool_details.unwrap().tool_version, "0.1.0");
+    }
+
+    #[test]
+    fn test_with_re_metadata_fbcode() {
+        let metadata = RemoteExecutionMetadata {
+            buck_info: Some(BuckInfo {
+                build_id: "some-build-id".to_owned(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let request = with_re_metadata((), &metadata, true, "test-session-id");
+
+        // The plain-text build ID header is attached regardless of which
+        // binary metadata flavor is in use.
+        let build_id_header = request.metadata().get(RBE_BUILD_ID_HEADER).unwrap();
+        assert_eq!(build_id_header.to_str().unwrap(), "some-build-id");
+        assert!(request.metadata().get_bin("re-metadata-bin").is_some());
+        assert!(
+            request
+                .metadata()
+                .get_bin("build.bazel.remote.execution.v2.requestmetadata-bin")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_inject_headers_interceptor_adds_session_id() {
+        let mut interceptor = InjectHeadersInterceptor::new(&[], "test-session-id").unwrap();
+        let request = interceptor.call(tonic::Request::new(())).unwrap();
+        assert_eq!(
+            request
+                .metadata()
+                .get(RBE_SESSION_ID_HEADER)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "test-session-id"
+        );
+    }
+
+    #[test]
+    fn test_inject_headers_interceptor_user_session_id_wins() {
+        let headers = vec![HttpHeader {
+            key: "RBE-Session-ID".to_owned(),
+            value: "user-override".to_owned(),
+        }];
+        let mut interceptor = InjectHeadersInterceptor::new(&headers, "test-session-id").unwrap();
+        let request = interceptor.call(tonic::Request::new(())).unwrap();
+        let values: Vec<_> = request
+            .metadata()
+            .get_all(RBE_SESSION_ID_HEADER)
+            .iter()
+            .collect();
+        assert_eq!(values, vec!["user-override"]);
+    }
+
+    /// Bigger than tonic's default decoding limit (4 MiB), smaller than the client's default of
+    /// twice the batch size.
+    const LARGE_ACTION_RESULT_STDOUT_BYTES: usize = 5 * 1024 * 1024;
+
+    /// Answers every Execute and GetActionResult with an action result whose inline stdout is
+    /// `stdout_bytes` long.
+    #[derive(Clone)]
+    struct LargeActionResultService {
+        stdout_bytes: usize,
+        /// Advertised in the capabilities. 0 means no limit.
+        max_batch_total_size_bytes: i64,
+    }
+
+    impl LargeActionResultService {
+        fn action_result(&self) -> ActionResult {
+            ActionResult {
+                stdout_raw: vec![b'x'; self.stdout_bytes],
+                execution_metadata: Some(ExecutedActionMetadata::default()),
+                ..Default::default()
+            }
+        }
+    }
+
+    #[tonic::async_trait]
+    impl capabilities_server::Capabilities for LargeActionResultService {
+        async fn get_capabilities(
+            &self,
+            _request: tonic::Request<GetCapabilitiesRequest>,
+        ) -> Result<tonic::Response<ServerCapabilities>, tonic::Status> {
+            Ok(tonic::Response::new(ServerCapabilities {
+                cache_capabilities: Some(CacheCapabilities {
+                    max_batch_total_size_bytes: self.max_batch_total_size_bytes,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }))
+        }
+    }
+
+    #[tonic::async_trait]
+    impl action_cache_server::ActionCache for LargeActionResultService {
+        async fn get_action_result(
+            &self,
+            _request: tonic::Request<GetActionResultRequest>,
+        ) -> Result<tonic::Response<ActionResult>, tonic::Status> {
+            Ok(tonic::Response::new(self.action_result()))
+        }
+
+        async fn update_action_result(
+            &self,
+            _request: tonic::Request<UpdateActionResultRequest>,
+        ) -> Result<tonic::Response<ActionResult>, tonic::Status> {
+            Err(tonic::Status::unimplemented("update_action_result"))
+        }
+    }
+
+    #[tonic::async_trait]
+    impl execution_server::Execution for LargeActionResultService {
+        type ExecuteStream = BoxStream<'static, Result<Operation, tonic::Status>>;
+        type WaitExecutionStream = BoxStream<'static, Result<Operation, tonic::Status>>;
+
+        async fn execute(
+            &self,
+            _request: tonic::Request<GExecuteRequest>,
+        ) -> Result<tonic::Response<Self::ExecuteStream>, tonic::Status> {
+            let response = GExecuteResponse {
+                result: Some(self.action_result()),
+                ..Default::default()
+            };
+            let operation = Operation {
+                done: true,
+                result: Some(OpResult::Response(prost_types::Any {
+                    type_url: "type.googleapis.com/build.bazel.remote.execution.v2.ExecuteResponse"
+                        .to_owned(),
+                    value: response.encode_to_vec(),
+                })),
+                ..Default::default()
+            };
+            Ok(tonic::Response::new(
+                futures::stream::iter([Ok(operation)]).boxed(),
+            ))
+        }
+
+        async fn wait_execution(
+            &self,
+            _request: tonic::Request<WaitExecutionRequest>,
+        ) -> Result<tonic::Response<Self::WaitExecutionStream>, tonic::Status> {
+            Err(tonic::Status::unimplemented("wait_execution"))
+        }
+    }
+
+    async fn large_action_result_test_client(
+        service: LargeActionResultService,
+    ) -> anyhow::Result<(REClient, tokio::task::JoinHandle<()>)> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?.to_string();
+        let incoming = futures::stream::unfold(listener, |listener| async move {
+            let item = listener.accept().await.map(|(stream, _)| stream);
+            Some((item, listener))
+        });
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_service(CapabilitiesServer::new(service.clone()))
+                .add_service(ActionCacheServer::new(service.clone()))
+                .add_service(ExecutionServer::new(service))
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        let client = REClientBuilder::build_and_connect(
+            &Buck2OssReConfiguration {
+                cas_address: Some(address.clone()),
+                engine_address: Some(address.clone()),
+                action_cache_address: Some(address),
+                tls: false,
+                ..Default::default()
+            },
+            1,
+        )
+        .await?;
+        Ok((client, server))
+    }
+
+    #[tokio::test]
+    async fn test_get_action_result_larger_than_tonic_default() -> anyhow::Result<()> {
+        let (client, server) = large_action_result_test_client(LargeActionResultService {
+            stdout_bytes: LARGE_ACTION_RESULT_STDOUT_BYTES,
+            max_batch_total_size_bytes: 0,
+        })
+        .await?;
+
+        let response = client
+            .get_action_result(
+                &RemoteExecutionMetadata::default(),
+                ActionResultRequest::default(),
+            )
+            .await?;
+        assert_eq!(
+            response.action_result.stdout_raw.map(|stdout| stdout.len()),
+            Some(LARGE_ACTION_RESULT_STDOUT_BYTES)
+        );
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_larger_than_tonic_default() -> anyhow::Result<()> {
+        let (client, server) = large_action_result_test_client(LargeActionResultService {
+            stdout_bytes: LARGE_ACTION_RESULT_STDOUT_BYTES,
+            max_batch_total_size_bytes: 0,
+        })
+        .await?;
+
+        let responses: Vec<_> = client
+            .execute_with_progress(
+                &RemoteExecutionMetadata::default(),
+                ExecuteRequest::default(),
+            )
+            .await?
+            .try_collect()
+            .await?;
+        let execute_response = responses
+            .into_iter()
+            .find_map(|response| response.execute_response)
+            .context("Execute stream ended without a response")?;
+        assert_eq!(
+            execute_response
+                .action_result
+                .stdout_raw
+                .map(|stdout| stdout.len()),
+            Some(LARGE_ACTION_RESULT_STDOUT_BYTES)
+        );
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_small_batch_size_keeps_tonic_default_decoding_limit() -> anyhow::Result<()> {
+        // Twice this batch size is below tonic's 4 MiB default, and the action result is
+        // between the two.
+        let stdout_bytes = 3 * 1024 * 1024;
+        let (client, server) = large_action_result_test_client(LargeActionResultService {
+            stdout_bytes,
+            max_batch_total_size_bytes: 1_000_000,
+        })
+        .await?;
+
+        let response = client
+            .get_action_result(
+                &RemoteExecutionMetadata::default(),
+                ActionResultRequest::default(),
+            )
+            .await?;
+        assert_eq!(
+            response.action_result.stdout_raw.map(|stdout| stdout.len()),
+            Some(stdout_bytes)
+        );
+
+        server.abort();
+        Ok(())
+    }
 }
 
 #[tokio::test]
@@ -3917,6 +4763,8 @@ async fn test_upload_compressed() -> anyhow::Result<()> {
         &InstanceName(Some("instance".to_owned())),
         req,
         Some(Compressor::Zstd),
+        1,
+        None,
         1,
         None,
         |_req| async move {
@@ -3966,6 +4814,8 @@ async fn test_download_compressed() -> anyhow::Result<()> {
         },
         Some(Compressor::Zstd),
         10,
+        1,
+        None,
         |_req| async { panic!("not called") },
         |_req| async move {
             Ok(Box::pin(futures::stream::iter(
