@@ -790,18 +790,15 @@ enum ParseEventError {
 #[buck2(tag = Tier0)]
 pub struct InvalidBuckEvent(pub Arc<BuckEvent>);
 
-pub fn format_test_result(
-    test_result: &buck2_data::TestResult,
-    verbosity: Verbosity,
-) -> buck2_error::Result<Option<Lines>> {
-    let buck2_data::TestResult {
-        name,
-        status,
-        duration,
-        details,
-        ..
-    } = test_result;
-    let status = TestStatus::try_from(*status)?;
+/// The single styled summary line for a test result: status prefix, name, and
+/// (when reported) duration. Shared by the scrollback formatter and the
+/// finished-tests window so both stay in sync.
+pub fn test_result_oneline(
+    status: i32,
+    name: &str,
+    duration: Option<Duration>,
+) -> buck2_error::Result<Line> {
+    let status = TestStatus::try_from(status)?;
 
     let prefix = match status {
         TestStatus::FAIL => Span::new_styled("✗ Fail".to_owned().red()),
@@ -816,25 +813,68 @@ pub fn format_test_result(
         TestStatus::RERUN => Span::new_styled("↻ Rerun".to_owned().cyan()),
         TestStatus::LISTING_FAILED => Span::new_styled("⚠ Listing failed".to_owned().red()),
     }?;
-    let mut base = Line::from_iter([prefix, Span::new_unstyled(format!(": {name}",))?]);
+    let mut line = Line::from_iter([prefix, Span::new_unstyled(format!(": {name}",))?]);
 
     if let Some(duration) = duration {
-        if let Ok(duration) = Duration::try_from(*duration) {
-            base.push(Span::new_unstyled(format!(
-                " ({})",
-                fmt_duration::fmt_duration(duration)
-            ))?);
-        }
+        line.push(Span::new_unstyled(format!(
+            " ({})",
+            fmt_duration::fmt_duration(duration)
+        ))?);
     }
+    Ok(line)
+}
+
+/// The wall-clock duration of a finished test, if it was reported.
+pub fn test_result_duration(test_result: &buck2_data::TestResult) -> Option<Duration> {
+    test_result
+        .duration
+        .and_then(|duration| Duration::try_from(duration).ok())
+}
+
+pub fn format_test_result(
+    test_result: &buck2_data::TestResult,
+    verbosity: Verbosity,
+) -> buck2_error::Result<Option<Lines>> {
+    let buck2_data::TestResult {
+        name,
+        status,
+        details,
+        ..
+    } = test_result;
+
+    let base = test_result_oneline(*status, name, test_result_duration(test_result))?;
+
     // Show details for non-passing tests always. For passing tests, only
     // show details if the test_passing_details verbosity item is set
     // (e.g. via --print-passing-details or -v=test_passing_details).
     let mut lines = vec![base];
-    let is_passing = matches!(&status, TestStatus::PASS | TestStatus::LISTING_SUCCESS);
+    let is_passing = matches!(
+        TestStatus::try_from(*status)?,
+        TestStatus::PASS | TestStatus::LISTING_SUCCESS
+    );
     if !details.is_empty() && (!is_passing || verbosity.print_test_passing_details()) {
         lines.append(&mut Lines::from_multiline_string(details, Default::default()).0);
     }
     Ok(Some(Lines(lines)))
+}
+
+/// Whether this test result is a problem (failure-like) result. Consoles
+/// hiding non-problem results (`[ui] slim_test_output`) still print these;
+/// the rest only show up in the live counters.
+pub fn is_test_result_problem(test_result: &buck2_data::TestResult) -> buck2_error::Result<bool> {
+    Ok(match TestStatus::try_from(test_result.status)? {
+        TestStatus::PASS
+        | TestStatus::LISTING_SUCCESS
+        | TestStatus::SKIP
+        | TestStatus::OMITTED
+        | TestStatus::RERUN => false,
+        TestStatus::FAIL
+        | TestStatus::FATAL
+        | TestStatus::TIMEOUT
+        | TestStatus::INFRA_FAILURE
+        | TestStatus::LISTING_FAILED
+        | TestStatus::UNKNOWN => true,
+    })
 }
 
 pub struct ActionErrorDisplay<'a> {
@@ -1354,6 +1394,54 @@ mod tests {
 
     use super::*;
 
+    fn test_result(status: TestStatus, details: &str) -> buck2_data::TestResult {
+        buck2_data::TestResult {
+            name: "example_test".to_owned(),
+            status: status.try_into().unwrap(),
+            details: details.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn problem_test_results() {
+        let problems = [
+            TestStatus::FAIL,
+            TestStatus::FATAL,
+            TestStatus::TIMEOUT,
+            TestStatus::INFRA_FAILURE,
+            TestStatus::LISTING_FAILED,
+            TestStatus::UNKNOWN,
+        ];
+        for status in problems {
+            assert!(is_test_result_problem(&test_result(status, "")).unwrap());
+        }
+
+        let non_problems = [
+            TestStatus::PASS,
+            TestStatus::LISTING_SUCCESS,
+            TestStatus::SKIP,
+            TestStatus::OMITTED,
+            TestStatus::RERUN,
+        ];
+        for status in non_problems {
+            assert!(!is_test_result_problem(&test_result(status, "")).unwrap());
+        }
+    }
+
+    #[test]
+    fn oneline_summary_has_prefix_and_name() {
+        let result = test_result(TestStatus::PASS, "");
+        let line = test_result_oneline(result.status, &result.name, test_result_duration(&result))
+            .unwrap();
+        let rendered = line.fmt_for_test().to_string();
+        assert!(rendered.contains("Pass"), "unexpected render: {rendered}");
+        assert!(
+            rendered.contains("example_test"),
+            "unexpected render: {rendered}"
+        );
+    }
+
     fn action_execution_event(identifier: &str) -> BuckEvent {
         BuckEvent::new(
             UNIX_EPOCH,
@@ -1415,18 +1503,6 @@ mod tests {
         assert_eq!(display.category.as_deref(), Some("category"));
 
         Ok(())
-    }
-
-    fn test_result(status: TestStatus, details: &str) -> buck2_data::TestResult {
-        buck2_data::TestResult {
-            name: "example_test".to_owned(),
-            status: status.try_into().unwrap(),
-            msg: None,
-            duration: None,
-            details: details.to_owned(),
-            target_label: None,
-            max_memory_used_bytes: None,
-        }
     }
 
     #[test]

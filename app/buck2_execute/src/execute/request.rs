@@ -399,6 +399,10 @@ pub struct CommandExecutionRequest {
     outputs_for_error_handler: Vec<BuildArtifactPath>,
     /// String representation of a key that uniquely identifies a RunAction
     run_action_key: Option<String>,
+    /// Output artifact to which the command's stdout is written
+    stdout_artifact: Option<BuildArtifactPath>,
+    /// Output artifact to which the command's stderr is written
+    stderr_artifact: Option<BuildArtifactPath>,
 
     is_test: bool,
     /// Whether to skip resource control (cgroup) for this command.
@@ -412,6 +416,10 @@ pub struct CommandExecutionRequest {
     /// ignoring the inherited `network_access` policy; no effect on RE. Set by the test
     /// orchestrator's `disable_local_network_isolation`, which explains the rationale.
     disable_local_network_isolation: bool,
+
+    /// Whether to disable local sandboxing for this specific action,
+    /// even when the executor has sandboxing enabled.
+    disable_local_sandbox: bool,
 }
 
 impl CommandExecutionRequest {
@@ -447,10 +455,13 @@ impl CommandExecutionRequest {
             meta_internal_extra_params: MetaInternalExtraParams::default_arc(),
             outputs_for_error_handler: Vec::new(),
             run_action_key: None,
+            stdout_artifact: None,
+            stderr_artifact: None,
             is_test: false,
             skip_resource_control: false,
             network_access: None,
             disable_local_network_isolation: false,
+            disable_local_sandbox: false,
         }
     }
 
@@ -690,6 +701,24 @@ impl CommandExecutionRequest {
         &self.outputs_for_error_handler
     }
 
+    pub fn with_stdout_artifact(mut self, stdout_artifact: Option<BuildArtifactPath>) -> Self {
+        self.stdout_artifact = stdout_artifact;
+        self
+    }
+
+    pub fn stdout_artifact(&self) -> Option<&BuildArtifactPath> {
+        self.stdout_artifact.as_ref()
+    }
+
+    pub fn with_stderr_artifact(mut self, stderr_artifact: Option<BuildArtifactPath>) -> Self {
+        self.stderr_artifact = stderr_artifact;
+        self
+    }
+
+    pub fn stderr_artifact(&self) -> Option<&BuildArtifactPath> {
+        self.stderr_artifact.as_ref()
+    }
+
     pub fn with_remote_execution_custom_image(
         mut self,
         remote_execution_custom_image: Option<RemoteExecutorCustomImage>,
@@ -757,6 +786,15 @@ impl CommandExecutionRequest {
 
     pub fn disable_local_network_isolation(&self) -> bool {
         self.disable_local_network_isolation
+    }
+
+    pub fn with_disable_local_sandbox(mut self, disable_local_sandbox: bool) -> Self {
+        self.disable_local_sandbox = disable_local_sandbox;
+        self
+    }
+
+    pub fn disable_local_sandbox(&self) -> bool {
+        self.disable_local_sandbox
     }
 }
 

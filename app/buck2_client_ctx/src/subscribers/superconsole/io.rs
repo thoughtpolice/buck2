@@ -10,8 +10,9 @@
 
 use buck2_core::io_counters::IoCounterKey;
 use buck2_event_observer::humanized::HumanizedBytes;
+use buck2_event_observer::re_state::NetworkStats;
+use buck2_event_observer::re_state::ReState;
 use buck2_event_observer::two_snapshots::TwoSnapshots;
-use gazebo::prelude::*;
 use superconsole::Component;
 use superconsole::Dimensions;
 use superconsole::DrawMode;
@@ -22,44 +23,25 @@ use crate::subscribers::superconsole::SuperConsoleConfig;
 
 pub(crate) struct IoHeader<'s> {
     pub(crate) super_console_config: &'s SuperConsoleConfig,
+    pub(crate) re_state: &'s ReState,
     pub(crate) two_snapshots: &'s TwoSnapshots,
 }
 
 impl Component for IoHeader<'_> {
     type Error = buck2_error::Error;
 
-    fn draw_unchecked(&self, dimensions: Dimensions, mode: DrawMode) -> buck2_error::Result<Lines> {
+    fn draw_unchecked(
+        &self,
+        _dimensions: Dimensions,
+        mode: DrawMode,
+    ) -> buck2_error::Result<Lines> {
         render(
             self.two_snapshots,
+            self.re_state,
             mode,
-            dimensions.width,
             self.super_console_config.enable_io,
         )
     }
-}
-
-/// Place space-separated words on lines.
-fn words_to_lines(words: Vec<String>, width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut current_line = String::new();
-    for word in words {
-        if current_line.is_empty() {
-            current_line = word;
-            continue;
-        }
-        // This works correctly only for ASCII strings.
-        if current_line.len() + 1 + word.len() > width {
-            lines.push(current_line);
-            current_line = word;
-        } else {
-            current_line.push(' ');
-            current_line.push_str(&word);
-        }
-    }
-    if !current_line.is_empty() {
-        lines.push(current_line);
-    }
-    lines
 }
 
 pub fn io_in_flight_non_zero_counters(
@@ -93,31 +75,51 @@ pub fn io_in_flight_non_zero_counters(
         .filter(|(_, value)| *value > 0)
 }
 
+/// One memory field, rendering the running value and its peak side by side as
+/// `Label = <current> (max <peak>)`. Either half is dropped when the platform or
+/// the allocator does not report it, and the field disappears entirely when
+/// neither is available.
+fn memory_field(label: &str, current: Option<u64>, max: Option<u64>) -> Option<String> {
+    match (current, max) {
+        (Some(current), Some(max)) => Some(format!(
+            "{label} = {} (max {})",
+            HumanizedBytes::fixed_width(current),
+            HumanizedBytes::new(max)
+        )),
+        (Some(current), None) => Some(format!(
+            "{label} = {}",
+            HumanizedBytes::fixed_width(current)
+        )),
+        (None, Some(max)) => Some(format!("Max {label} = {}", HumanizedBytes::new(max))),
+        (None, None) => None,
+    }
+}
+
 fn do_render(
     two_snapshots: &TwoSnapshots,
     snapshot: &buck2_data::Snapshot,
-    width: usize,
+    network: Option<NetworkStats>,
 ) -> buck2_error::Result<Lines> {
     let mut lines = Vec::new();
-    const RSS_FIELD_WIDTH: usize = "RSS = ".len() + HumanizedBytes::FIXED_WIDTH_WIDTH;
 
     let mut allocator = Vec::new();
-    if let Some(rss) = snapshot.buck2_rss {
-        allocator.push(format!("RSS = {}", HumanizedBytes::fixed_width(rss)));
-    } else if snapshot.buck2_max_rss > 0
-        && (snapshot.malloc_bytes_active.is_some() || snapshot.malloc_bytes_allocated.is_some())
-    {
-        allocator.push(" ".repeat(RSS_FIELD_WIDTH));
-    }
-    if let Some(active) = snapshot.malloc_bytes_active {
-        allocator.push(format!("Active = {}", HumanizedBytes::fixed_width(active)));
-    }
-    if let Some(allocated) = snapshot.malloc_bytes_allocated {
-        allocator.push(format!(
-            "Allocated = {}",
-            HumanizedBytes::fixed_width(allocated)
-        ));
-    }
+    // Current RSS is unavailable on non-Linux Unix platforms, so max RSS is kept
+    // independent of it rather than gated on it.
+    allocator.extend(memory_field(
+        "RSS",
+        snapshot.buck2_rss,
+        (snapshot.buck2_max_rss > 0).then_some(snapshot.buck2_max_rss),
+    ));
+    allocator.extend(memory_field(
+        "Active",
+        snapshot.malloc_bytes_active,
+        two_snapshots.max_malloc_bytes_active,
+    ));
+    allocator.extend(memory_field(
+        "Allocated",
+        snapshot.malloc_bytes_allocated,
+        two_snapshots.max_malloc_bytes_allocated,
+    ));
     if let (Some(active), Some(allocated)) = (
         snapshot.malloc_bytes_active,
         snapshot.malloc_bytes_allocated,
@@ -137,45 +139,16 @@ fn do_render(
         ));
     }
     if !allocator.is_empty() {
-        lines.push(Line::unstyled(&format!(
-            "Memory    : {}",
-            allocator.join("  ")
-        ))?);
-    }
-
-    let mut allocator_max = Vec::new();
-    // Current RSS is unavailable on non-Linux Unix platforms, so keep max RSS independent of it.
-    if snapshot.buck2_max_rss > 0 {
-        allocator_max.push(format!(
-            "RSS = {}",
-            HumanizedBytes::fixed_width(snapshot.buck2_max_rss)
-        ));
-    } else if snapshot.buck2_rss.is_some()
-        && (two_snapshots.max_malloc_bytes_active.is_some()
-            || two_snapshots.max_malloc_bytes_allocated.is_some())
-    {
-        allocator_max.push(" ".repeat(RSS_FIELD_WIDTH));
-    }
-    if let Some(max_active) = two_snapshots.max_malloc_bytes_active {
-        allocator_max.push(format!(
-            "Active = {}",
-            HumanizedBytes::fixed_width(max_active)
-        ));
-    }
-    if let Some(max_allocated) = two_snapshots.max_malloc_bytes_allocated {
-        allocator_max.push(format!(
-            "Allocated = {}",
-            HumanizedBytes::fixed_width(max_allocated)
-        ));
-    }
-    if !allocator_max.is_empty() {
-        lines.push(Line::unstyled(&format!(
-            "Memory Max: {}",
-            allocator_max.join("  ")
-        ))?);
+        lines.push(Line::unstyled(&format!("Memory: {}", allocator.join("  ")))?);
     }
 
     let mut parts = Vec::new();
+    if let Some(stats) = network {
+        parts.push(format!(
+            "Network: {}",
+            stats.display_up_down(DrawMode::Normal)
+        ));
+    }
     let user_cpu_percents = two_snapshots.user_cpu_percents();
     let system_cpu_percents = two_snapshots.system_cpu_percents();
     if user_cpu_percents.is_some() || system_cpu_percents.is_some() {
@@ -190,82 +163,46 @@ fn do_render(
         parts.push(cpu_str);
     }
 
-    // Show Tokio IO metrics in compact format: busy/total+queue
-    parts.push(format!(
-        "Tokio IO = {}/{}+{}",
-        snapshot.tokio_num_blocking_threads - snapshot.tokio_num_idle_blocking_threads,
-        snapshot.tokio_num_blocking_threads,
-        snapshot.tokio_blocking_queue_depth
-    ));
-
-    if snapshot.deferred_materializer_queue_size > 0 {
-        parts.push(format!(
-            "DM Queue = {}",
-            snapshot.deferred_materializer_queue_size
-        ));
-    }
-    if snapshot.blocking_executor_io_queue_size > 0 {
-        parts.push(format!(
-            "IO Queue = {}",
-            snapshot.blocking_executor_io_queue_size
-        ));
-    }
     if !parts.is_empty() {
         lines.push(Line::from_iter([superconsole::Span::new_unstyled(
             parts.join("  "),
         )?]));
     }
 
-    let mut counters = Vec::new();
-    for (key, value) in io_in_flight_non_zero_counters(snapshot) {
-        counters.push(format!("{key:?} = {value}"));
-    }
-    lines.extend(words_to_lines(counters, width).into_try_map(|s| Line::unstyled(&s))?);
-
     Ok(Lines(lines))
 }
 
 fn render(
     two_snapshots: &TwoSnapshots,
+    re_state: &ReState,
     draw_mode: DrawMode,
-    width: usize,
     enabled: bool,
 ) -> buck2_error::Result<Lines> {
     if !enabled {
         return Ok(Lines::new());
     }
+    // Total network traffic shares the I/O stats line rather than living in
+    // the session info block.
+    let network = re_state.network_stats(two_snapshots);
+    // The other stats are instantaneous and meaningless once the command is
+    // over; only the network totals survive into the final render.
     if let DrawMode::Final = draw_mode {
-        return Ok(Lines::new());
+        return Ok(Lines(
+            network
+                .map(|stats| {
+                    Line::unstyled(&format!(
+                        "Network: {}",
+                        stats.display_up_down(DrawMode::Final)
+                    ))
+                })
+                .transpose()?
+                .into_iter()
+                .collect(),
+        ));
     }
     if let Some((_, snapshot)) = &two_snapshots.last {
-        do_render(two_snapshots, snapshot, width)
+        do_render(two_snapshots, snapshot, network)
     } else {
         Ok(Lines::new())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::words_to_lines;
-
-    #[test]
-    fn test_words_to_lines() {
-        assert_eq!(Vec::<String>::new(), words_to_lines(vec![], 5));
-        assert_eq!(
-            vec!["ab".to_owned()],
-            words_to_lines(vec!["ab".to_owned()], 5)
-        );
-        assert_eq!(
-            vec!["ab cd".to_owned()],
-            words_to_lines(vec!["ab".to_owned(), "cd".to_owned()], 5)
-        );
-        assert_eq!(
-            vec!["ab".to_owned(), "cd".to_owned()],
-            words_to_lines(vec!["ab".to_owned(), "cd".to_owned()], 4)
-        );
-        assert_eq!(
-            vec!["abcd".to_owned()],
-            words_to_lines(vec!["abcd".to_owned()], 3)
-        );
     }
 }
