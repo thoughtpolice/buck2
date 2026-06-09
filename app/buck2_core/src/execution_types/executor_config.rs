@@ -12,6 +12,7 @@ use std::fmt::Display;
 use std::fmt::Formatter;
 use std::hash::Hash;
 use std::hash::Hasher;
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -29,15 +30,91 @@ use starlark_map::sorted_map::SortedMap;
 use static_interner::Intern;
 use static_interner::interner;
 
+#[derive(Debug, Default, Eq, Hash, PartialEq, Clone, Copy, Dupe, Allocative, Pagable)]
+pub enum LocalSandboxMode {
+    #[default]
+    Disabled,
+    /// Symlink farm: inputs symlinked into temp dir, action runs there.
+    Symlink,
+    /// Symlink farm + Landlock kernel enforcement. Falls back to Symlink
+    /// if Landlock unavailable.
+    Landlock,
+    /// Automatic: Landlock on Linux, Symlink elsewhere.
+    Native,
+}
+
+#[derive(Debug, buck2_error::Error)]
+#[buck2(input)]
+enum LocalSandboxModeError {
+    #[error(
+        "Invalid local_sandbox_mode: `{0}`. Expected one of: \"disabled\", \"symlink\", \"landlock\", \"native\""
+    )]
+    InvalidMode(String),
+}
+
+impl FromStr for LocalSandboxMode {
+    type Err = buck2_error::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "disabled" => Ok(LocalSandboxMode::Disabled),
+            "symlink" => Ok(LocalSandboxMode::Symlink),
+            "landlock" => Ok(LocalSandboxMode::Landlock),
+            "native" => Ok(LocalSandboxMode::Native),
+            _ => Err(LocalSandboxModeError::InvalidMode(s.to_owned()).into()),
+        }
+    }
+}
+
+/// Paths outside the project that a sandboxed local action may access, besides its own inputs
+/// and outputs. A list left as `None` keeps the sandbox's built-in defaults.
+#[derive(Debug, Default, Eq, Hash, PartialEq, Clone, Allocative, Pagable)]
+pub struct LocalSandboxPaths {
+    /// Paths the action may read and execute beneath.
+    pub read: Option<Vec<String>>,
+    /// Paths the action may read and write beneath.
+    pub write: Option<Vec<String>>,
+}
+
+#[derive(Debug, buck2_error::Error)]
+#[buck2(input)]
+enum LocalSandboxPathsError {
+    #[error("Sandbox paths must be absolute, got `{0}`")]
+    RelativePath(String),
+}
+
+impl LocalSandboxPaths {
+    /// Check one configured list of paths. Relative paths are rejected, because they would
+    /// resolve against whatever directory the process applying the sandbox runs in.
+    pub fn parse_paths(
+        paths: impl IntoIterator<Item = String>,
+    ) -> buck2_error::Result<Vec<String>> {
+        paths
+            .into_iter()
+            .map(|path| {
+                if Path::new(&path).is_absolute() {
+                    Ok(path)
+                } else {
+                    Err(LocalSandboxPathsError::RelativePath(path).into())
+                }
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, Eq, Hash, PartialEq, Clone, Dupe, Allocative, Pagable)]
 pub struct LocalExecutorOptions {
     pub use_persistent_workers: bool,
+    pub sandbox_mode: LocalSandboxMode,
+    pub sandbox_paths: Arc<LocalSandboxPaths>,
 }
 
 impl Default for LocalExecutorOptions {
     fn default() -> Self {
         Self {
             use_persistent_workers: true,
+            sandbox_mode: LocalSandboxMode::Disabled,
+            sandbox_paths: Default::default(),
         }
     }
 }
@@ -747,6 +824,22 @@ mod tests {
         assert!(
             parse_network_access("default").is_err(),
             "Omitted network_access should use the default executor behavior"
+        );
+    }
+
+    #[test]
+    fn test_sandbox_paths_parse_keeps_absolute_paths() {
+        let paths = LocalSandboxPaths::parse_paths(["/opt/tools".to_owned(), "/nix".to_owned()]);
+        assert_eq!(paths.unwrap(), ["/opt/tools", "/nix"]);
+    }
+
+    #[test]
+    fn test_sandbox_paths_parse_rejects_relative_paths() {
+        let err = LocalSandboxPaths::parse_paths(["/opt/tools".to_owned(), "tools".to_owned()])
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("must be absolute, got `tools`"),
+            "{err}"
         );
     }
 }
