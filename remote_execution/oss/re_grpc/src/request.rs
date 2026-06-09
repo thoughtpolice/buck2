@@ -26,6 +26,28 @@ pub struct DownloadRequest {
     pub _dot_dot: (),
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RemoteAssetKind {
+    #[default]
+    Blob,
+    Directory,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RemoteAssetQualifier {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RemoteAssetRequest {
+    pub kind: RemoteAssetKind,
+    pub uris: Vec<String>,
+    pub qualifiers: Vec<RemoteAssetQualifier>,
+    pub digest_function: i32,
+    pub timeout_seconds: Option<u64>,
+}
+
 #[derive(Default)]
 pub struct NamedDigestWithPermissions {
     pub named_digest: NamedDigest,
