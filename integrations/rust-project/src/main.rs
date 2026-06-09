@@ -39,6 +39,23 @@ use crate::cli::ProjectKind;
 use crate::project_json::Crate;
 use crate::project_json::Dep;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TestRunnableArgs(Vec<String>);
+
+impl FromStr for TestRunnableArgs {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let Some(args) = shlex::split(value) else {
+            return Err("test runnable has invalid shell quoting");
+        };
+        if args.is_empty() {
+            return Err("test runnable must contain at least one argument");
+        }
+        Ok(Self(args))
+    }
+}
+
 #[derive(Parser, Debug, PartialEq)]
 struct Opt {
     #[clap(subcommand)]
@@ -112,6 +129,10 @@ enum Command {
         #[clap(long)]
         buck2_command: Option<String>,
 
+        /// Shell-style argument template for rust-analyzer test runnables.
+        #[clap(long)]
+        test_runnable: Option<TestRunnableArgs>,
+
         #[clap(long, default_value = "50", env = "RUST_PROJECT_EXTRA_TARGETS")]
         max_extra_targets: Option<usize>,
 
@@ -155,6 +176,10 @@ enum Command {
         /// Command used to run `buck2`. Defaults to `"buck2"`.
         #[clap(long)]
         buck2_command: Option<String>,
+
+        /// Shell-style argument template for rust-analyzer test runnables.
+        #[clap(long)]
+        test_runnable: Option<TestRunnableArgs>,
 
         #[clap(long, default_value = "50", env = "RUST_PROJECT_EXTRA_TARGETS")]
         max_extra_targets: Option<usize>,
@@ -483,6 +508,41 @@ fn test_parse_use_clippy() {
     ));
 }
 
+#[test]
+fn test_parse_test_runnable() {
+    let args = JsonArguments::Path(PathBuf::from("buck2/integrations/rust-project/src/main.rs"));
+    let expected = Opt {
+        command: Some(Command::DevelopJson {
+            sysroot_mode: SysrootMode::Rustc,
+            client: None,
+            mode: None,
+            buck2_command: None,
+            test_runnable: Some(TestRunnableArgs(vec![
+                "test".to_owned(),
+                "{label}".to_owned(),
+                "--".to_owned(),
+                "--test-arg".to_owned(),
+                "{test_id}".to_owned(),
+            ])),
+            max_extra_targets: Some(50),
+            rustc_target: None,
+            args,
+        }),
+        version: false,
+        isolation_dir: None,
+    };
+    let actual = Opt::try_parse_from([
+        "rust-project",
+        "develop-json",
+        "--sysroot-mode=rustc",
+        "--test-runnable=test {label} -- --test-arg {test_id}",
+        "{\"path\":\"buck2/integrations/rust-project/src/main.rs\"}",
+    ])
+    .expect("Unable to parse args");
+
+    assert_eq!(actual, expected);
+}
+
 #[cfg(fbcode_build)]
 #[test]
 fn json_args_pass() {
@@ -493,6 +553,7 @@ fn json_args_pass() {
             sysroot_mode: SysrootMode::BuckConfig,
             client: None,
             buck2_command: None,
+            test_runnable: None,
             max_extra_targets: Some(50),
             mode: None,
             rustc_target: None,
@@ -515,6 +576,7 @@ fn json_args_pass() {
             sysroot_mode: SysrootMode::BuckConfig,
             client: None,
             buck2_command: None,
+            test_runnable: None,
             max_extra_targets: Some(50),
             mode: None,
             rustc_target: None,
@@ -537,6 +599,7 @@ fn json_args_pass() {
             sysroot_mode: SysrootMode::BuckConfig,
             client: None,
             buck2_command: None,
+            test_runnable: None,
             max_extra_targets: Some(50),
             mode: None,
             rustc_target: None,

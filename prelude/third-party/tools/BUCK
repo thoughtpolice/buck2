@@ -10,6 +10,7 @@ prelude = native
 prelude.python_bootstrap_binary(
     name = "create_build-full",
     main = "create_build.py",
+    visibility = ["PUBLIC"],
 )
 
 # @oss-disable[end= ]: prelude.python_bootstrap_binary_stage0(
