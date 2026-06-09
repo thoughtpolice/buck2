@@ -29,30 +29,38 @@ use crate::manifold::manifold_leads;
 pub async fn upload_dice_dump(
     buckd: BootstrapBuckdClient,
     buck_out_dice: AbsNormPathBuf,
-    manifold: &ManifoldClient,
+    manifold: Option<&ManifoldClient>,
     manifold_id: &String,
 ) -> buck2_error::Result<String> {
     let buckd = buckd.to_connector();
     let mut events_ctx = EventsCtx::new(None, Default::default());
-    let manifold_bucket = Bucket::RAGE_DUMPS;
-    let manifold_filename = format!("flat/{manifold_id}_dice-dump.tar");
     let this_dump_folder_name = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-    DiceDump::new(buck_out_dice, &this_dump_folder_name)
-        .upload(
-            buckd,
-            &mut events_ctx,
-            manifold,
-            manifold_bucket,
-            &manifold_filename,
-        )
-        .await?;
-
-    Ok(manifold_leads(&manifold_bucket, manifold_filename))
+    let dice_dump = DiceDump::new(buck_out_dice, &this_dump_folder_name);
+    if let Some(manifold) = manifold {
+        let manifold_bucket = Bucket::RAGE_DUMPS;
+        let manifold_filename = format!("flat/{manifold_id}_dice-dump.tar");
+        dice_dump
+            .upload(
+                buckd,
+                &mut events_ctx,
+                manifold,
+                manifold_bucket,
+                &manifold_filename,
+            )
+            .await?;
+        Ok(manifold_leads(&manifold_bucket, manifold_filename))
+    } else {
+        dice_dump.dump_only(buckd, &mut events_ctx).await?;
+        Ok(format!(
+            "Dice dump saved to {}",
+            dice_dump.dump_folder.display()
+        ))
+    }
 }
 
-struct DiceDump {
+pub(crate) struct DiceDump {
     buck_out_dice: AbsNormPathBuf,
-    dump_folder: AbsPathBuf,
+    pub(crate) dump_folder: AbsPathBuf,
 }
 
 impl DiceDump {
@@ -65,13 +73,10 @@ impl DiceDump {
         }
     }
 
-    async fn upload(
+    async fn do_dump(
         &self,
         mut buckd: BuckdClientConnector,
         events_ctx: &mut EventsCtx,
-        manifold: &ManifoldClient,
-        manifold_bucket: Bucket,
-        manifold_filename: &str,
     ) -> buck2_error::Result<()> {
         fs_util::create_dir_all(&self.buck_out_dice).with_buck_error_context(|| {
             format!(
@@ -97,7 +102,27 @@ impl DiceDump {
                 )
             })?;
 
-        // create DICE dump name using the old command being rage on and the trace id of this rage command.
+        Ok(())
+    }
+
+    pub(crate) async fn dump_only(
+        &self,
+        buckd: BuckdClientConnector,
+        events_ctx: &mut EventsCtx,
+    ) -> buck2_error::Result<()> {
+        self.do_dump(buckd, events_ctx).await
+    }
+
+    async fn upload(
+        &self,
+        buckd: BuckdClientConnector,
+        events_ctx: &mut EventsCtx,
+        manifold: &ManifoldClient,
+        manifold_bucket: Bucket,
+        manifold_filename: &str,
+    ) -> buck2_error::Result<()> {
+        self.do_dump(buckd, events_ctx).await?;
+
         upload_to_manifold(
             &self.dump_folder,
             manifold,
@@ -118,8 +143,6 @@ async fn upload_to_manifold(
     manifold_filename: &str,
 ) -> buck2_error::Result<()> {
     if !cfg!(target_os = "windows") {
-        buck2_core::facebook_only();
-
         let tar = async_background_command("tar")
             .arg("-c")
             .arg(dump_folder)

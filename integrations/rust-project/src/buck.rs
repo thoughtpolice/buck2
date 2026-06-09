@@ -50,15 +50,32 @@ use crate::target::TargetInfo;
 const CLIENT_METADATA_RUST_PROJECT: &str = "--client-metadata=id=rust-project";
 
 fn crate_cfg(
+    target: &Target,
     info: &TargetInfo,
     global_extra_cfgs: &[String],
     first_party_extra_cfgs: &[String],
 ) -> Vec<String> {
+    // `first_party_extra_cfgs` is `["test"]`: a crate may advertise `cfg(test)`
+    // only when it is actually compiled as a test. That is either a test target,
+    // or a library that absorbed its generated `<target>-unittest` (the fbcode
+    // model; see `merge_unit_test_targets`, whose merge condition this mirrors).
+    //
+    // A plain library must NOT claim `cfg(test)`. If it does, a repo that models
+    // unit tests as a *separate* target sharing the library's crate root (e.g. a
+    // colocated `:unit`) yields a library crate and a test crate that are
+    // identical in (root, cfg, edition, env); rust-analyzer collapses them into
+    // one node, drags the test's dev-only deps into the library, and the crate
+    // graph gains cycles (e.g. `lib -> testutils -> lib`).
+    let is_test_compilation = info.kind == Kind::Test
+        || info
+            .test_deps
+            .contains(&Target::new(format!("{target}-unittest")));
+
     info.cfg()
         .into_iter()
         .chain(global_extra_cfgs.iter().cloned())
         .chain(
-            (!info.is_reindeer_third_party())
+            (!info.is_reindeer_third_party() && is_test_compilation)
                 .then(|| first_party_extra_cfgs.iter().cloned())
                 .into_iter()
                 .flatten(),
@@ -72,6 +89,7 @@ pub(crate) fn to_project_json(
     aliases: FxHashMap<Target, AliasedTargetInfo>,
     check_cycles: bool,
     include_all_buildfiles: bool,
+    use_clippy: bool,
     global_extra_cfgs: &[String],
     first_party_extra_cfgs: &[String],
     buck: &Buck,
@@ -229,7 +247,7 @@ pub(crate) fn to_project_json(
                 include_dirs,
                 exclude_dirs: vec![],
             }),
-            cfg: crate_cfg(info, global_extra_cfgs, first_party_extra_cfgs),
+            cfg: crate_cfg(target, info, global_extra_cfgs, first_party_extra_cfgs),
             env,
             build,
             is_proc_macro: info.proc_macro.unwrap_or(false),
@@ -244,22 +262,110 @@ pub(crate) fn to_project_json(
         check_cycles_in_crate_graph(&crates);
     }
 
+    // Generate the test runnable's program and arguments with `Buck::command`
+    // so that the runnable respects `--buck2-command` and carries the same
+    // isolation dir, client metadata, and configuration as every other buck
+    // invocation made by rust-project.
+    let buck_test_command = buck.command(["test", "{label}"]);
+    let buck_test_program = buck_test_command.get_program().to_str().unwrap().to_owned();
+    // It is safe to call unwrap on these because we've constructed all the
+    // args from Rust strings (i.e. utf-8) so `to_str` will never return
+    // `None`.
+    let mut buck_test_args: Vec<String> = buck_test_command
+        .get_args()
+        .map(|a| a.to_str().unwrap().to_owned())
+        .collect();
+
+    buck_test_args.push("--".to_owned());
+
+    if cfg!(fbcode_build) {
+        buck_test_args.extend(["{test_id}".to_owned(), "--print-passing-details".to_owned()]);
+    } else {
+        // R-A substitutes {test_id} with e.g. `mycrate::tests::one`.
+        // --test-arg tells `buck2 test` to pass the following strings through
+        // to the test program, which we will assume to be the default rust
+        // test harness:
+        //
+        // - `--exact`: only run the test named exactly {test_id}. Rust allows
+        //   functions and modules to have the same name in the same namespace,
+        //   so a test name can be the prefix of another.
+        // - `--no-capture`: print the test's output, in the spirit of
+        //   `--print-passing-details` above.
+        //
+        // Same overall effect as
+        // `cargo test -- --exact --no-capture mycrate::tests::one`.
+        //
+        // But this is a bit less than ideal, because buck will build
+        // all of the related test binaries, including integration tests.
+        // We don't know your naming conventions for library tests.
+        // You might have a rust_test target named `mycrate-test`. So
+        // we might need a way (probably buck metadata in the library
+        // target, or just querying the related tests)
+        // to tell rust-project about these.
+        buck_test_args.extend([
+            "--test-arg".to_owned(),
+            "--exact".to_owned(),
+            "--no-capture".to_owned(),
+            "{test_id}".to_owned(),
+        ]);
+    }
+
+    let mut runnables = vec![];
+
+    #[cfg(fbcode_build)]
+    {
+        runnables.extend([Runnable {
+            program: buck_test_program,
+            args: buck_test_args,
+            cwd: project_root.to_owned(),
+            kind: RunnableKind::TestOne,
+        }]);
+    }
+
+    #[cfg(not(fbcode_build))]
+    {
+        let rust_project_executable = std::env::args().next().unwrap();
+
+        // Like the test runnable above, generate the run runnable's program
+        // and args with `Buck::command` so that it respects `--buck2-command`.
+        let buck_run_command = buck.command(["run", "{label}"]);
+
+        runnables.extend([
+            Runnable {
+                kind: RunnableKind::Flycheck,
+                program: rust_project_executable,
+                args: {
+                    let mut args = vec!["check".to_owned(), "{label}".to_owned()];
+                    if !use_clippy {
+                        args.push("--use-clippy".to_owned());
+                        args.push("false".to_owned());
+                    }
+                    args
+                },
+                cwd: project_root.clone(),
+            },
+            Runnable {
+                kind: RunnableKind::Run,
+                program: buck_run_command.get_program().to_str().unwrap().to_owned(),
+                args: buck_run_command
+                    .get_args()
+                    .map(|a| a.to_str().unwrap().to_owned())
+                    .collect(),
+                cwd: project_root.clone(),
+            },
+            Runnable {
+                kind: RunnableKind::TestOne,
+                program: buck_test_program,
+                args: buck_test_args,
+                cwd: project_root.clone(),
+            },
+        ]);
+    }
+
     let jp = ProjectJson {
         sysroot: Box::new(sysroot),
         crates,
-        runnables: vec![Runnable {
-            program: "buck".to_owned(),
-            args: vec![
-                "test".to_owned(),
-                CLIENT_METADATA_RUST_PROJECT.to_owned(),
-                "{label}".to_owned(),
-                "--".to_owned(),
-                "{test_id}".to_owned(),
-                "--print-passing-details".to_owned(),
-            ],
-            cwd: project_root.to_owned(),
-            kind: RunnableKind::TestOne,
-        }],
+        runnables,
         // needed to ignore the generated `rust-project.json` in diffs, but including the actual
         // string will mark this file as generated
         generated: String::from("\x40generated"),
@@ -605,17 +711,10 @@ impl Buck {
 
         command.arg("prelude//rust/rust-analyzer/check.bxl:check");
 
-        let mut file_path = saved_file.to_owned();
-        if !file_path.is_absolute() {
-            if let Ok(cwd) = std::env::current_dir() {
-                file_path = cwd.join(saved_file);
-            }
-        }
-
         // apply BXL scripts-specific arguments:
-        command.args(["--", "--file"]);
-        command.arg(file_path.as_os_str());
-
+        command.arg("--");
+        command.args(["--file"]);
+        command.arg(saved_file.as_os_str());
         command.args(["--use-clippy", &use_clippy.to_string()]);
 
         // Set working directory to the containing directory of the target file.
@@ -624,6 +723,35 @@ impl Buck {
         if let Some(parent_dir) = saved_file.parent() {
             command.current_dir(parent_dir);
         }
+
+        tracing::debug!(?command, "running bxl");
+
+        let output = command.output();
+
+        let files = deserialize_output(output, &command)?;
+        Ok(files)
+    }
+
+    #[instrument(fields(use_clippy, target = %target))]
+    pub(crate) fn check_target(
+        &self,
+        use_clippy: bool,
+        target: &Target,
+    ) -> Result<CheckOutput, anyhow::Error> {
+        let mut command = self.command(["bxl"]);
+
+        if let Some(mode) = &self.mode {
+            command.arg(mode);
+        }
+
+        command.arg("prelude//rust/rust-analyzer/check.bxl:check");
+
+        command.arg("--");
+        command.arg("--target");
+        command.arg(target);
+        command.args(["--use-clippy", &use_clippy.to_string()]);
+
+        tracing::debug!(?command, "running bxl");
 
         let output = command.output();
 
@@ -653,6 +781,8 @@ impl Buck {
             "--targets",
         ]);
         command.args(targets);
+
+        tracing::debug!(?command, "running bxl");
 
         let mut res: ExpandedAndResolved = deserialize_file_output(command.output(), &command)?;
 
@@ -1408,11 +1538,11 @@ fn integration_tests_preserved() {
 
 #[test]
 fn test_cfg_scoped_to_first_party() {
-    let make_info = |label: &str| TargetInfo {
+    let make_info = |label: &str, kind: Kind, test_deps: Vec<Target>| TargetInfo {
         name: "foo".to_owned(),
         label: label.to_owned(),
         labels: vec![],
-        kind: Kind::Library,
+        kind,
         edition: None,
         srcs: vec![],
         mapped_srcs: FxHashMap::default(),
@@ -1420,7 +1550,7 @@ fn test_cfg_scoped_to_first_party() {
         crate_dynamic: None,
         crate_root: PathBuf::default(),
         deps: vec![],
-        test_deps: vec![],
+        test_deps,
         named_deps: FxHashMap::default(),
         proc_macro: None,
         features: vec![],
@@ -1434,19 +1564,54 @@ fn test_cfg_scoped_to_first_party() {
     let global_extra_cfgs = &["fbcode_build".to_owned()];
     let first_party_extra_cfgs = &["test".to_owned()];
 
-    // First-party crate gets both `test` and `fbcode_build`, regardless of
-    // workspace membership (`in_workspace` is false here).
-    let first_party = crate_cfg(
-        &make_info("fbcode//buck2/integrations/rust-project:rust-project"),
+    let fp_label = "fbcode//buck2/integrations/rust-project:rust-project";
+
+    // A first-party *library* is not compiled as a test, so it must NOT get
+    // `cfg(test)`: otherwise it becomes indistinguishable (same root + cfg) from
+    // a colocated same-root unit-test crate, which rust-analyzer collapses,
+    // dragging test-only deps into the library and forming crate-graph cycles.
+    // It still gets the global `fbcode_build`.
+    let lib = crate_cfg(
+        &Target::new(fp_label),
+        &make_info(fp_label, Kind::Library, vec![]),
         global_extra_cfgs,
         first_party_extra_cfgs,
     );
-    assert!(first_party.contains(&"test".to_owned()));
-    assert!(first_party.contains(&"fbcode_build".to_owned()));
+    assert!(!lib.contains(&"test".to_owned()));
+    assert!(lib.contains(&"fbcode_build".to_owned()));
 
-    // Reindeer-vendored third-party crate keeps `fbcode_build` but not `test`.
+    // A first-party *test* target is compiled as a test and gets `cfg(test)`.
+    let test = crate_cfg(
+        &Target::new(fp_label),
+        &make_info(fp_label, Kind::Test, vec![]),
+        global_extra_cfgs,
+        first_party_extra_cfgs,
+    );
+    assert!(test.contains(&"test".to_owned()));
+    assert!(test.contains(&"fbcode_build".to_owned()));
+
+    // A first-party library that absorbed its generated `<target>-unittest` (the
+    // fbcode model, see `merge_unit_test_targets`) represents the test compile,
+    // so it keeps `cfg(test)`.
+    let merged_label = "fbcode//foo:foo";
+    let merged = crate_cfg(
+        &Target::new(merged_label),
+        &make_info(
+            merged_label,
+            Kind::Library,
+            vec![Target::new("fbcode//foo:foo-unittest")],
+        ),
+        global_extra_cfgs,
+        first_party_extra_cfgs,
+    );
+    assert!(merged.contains(&"test".to_owned()));
+
+    // A reindeer-vendored third-party crate keeps `fbcode_build` but never gets
+    // `test`, even if it were somehow a test compile.
+    let vendored_label = "fbsource//third-party/rust/vendor/tokio:1";
     let vendored = crate_cfg(
-        &make_info("fbsource//third-party/rust/vendor/tokio:1"),
+        &Target::new(vendored_label),
+        &make_info(vendored_label, Kind::Test, vec![]),
         global_extra_cfgs,
         first_party_extra_cfgs,
     );

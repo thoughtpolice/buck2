@@ -12,6 +12,7 @@ use std::io;
 
 fn main() -> io::Result<()> {
     let proto_files = &[
+        "proto/build/bazel/remote/asset/v1/remote_asset.proto",
         "proto/build/bazel/remote/execution/v2/remote_execution.proto",
         "proto/build/bazel/semver/semver.proto",
         "proto/google/api/annotations.proto",
@@ -35,6 +36,14 @@ fn main() -> io::Result<()> {
             "#[serde(with = \"::buck2_data::serialize_duration_as_micros\")]",
         )
         .field_attribute(
+            "build.bazel.remote.asset.v1.FetchBlobRequest.timeout",
+            "#[serde(with = \"::buck2_data::serialize_duration_as_micros\")]",
+        )
+        .field_attribute(
+            "build.bazel.remote.asset.v1.FetchDirectoryRequest.timeout",
+            "#[serde(with = \"::buck2_data::serialize_duration_as_micros\")]",
+        )
+        .field_attribute(
             "google.longrunning.WaitOperationRequest.timeout",
             "#[serde(with = \"::buck2_data::serialize_duration_as_micros\")]",
         )
@@ -52,6 +61,30 @@ fn main() -> io::Result<()> {
         )
         .field_attribute(
             "build.bazel.remote.execution.v2.NodeProperties.mtime",
+            "#[serde(with = \"::buck2_data::serialize_timestamp\")]",
+        )
+        .field_attribute(
+            "build.bazel.remote.asset.v1.FetchBlobRequest.oldest_content_accepted",
+            "#[serde(with = \"::buck2_data::serialize_timestamp\")]",
+        )
+        .field_attribute(
+            "build.bazel.remote.asset.v1.FetchBlobResponse.expires_at",
+            "#[serde(with = \"::buck2_data::serialize_timestamp\")]",
+        )
+        .field_attribute(
+            "build.bazel.remote.asset.v1.FetchDirectoryRequest.oldest_content_accepted",
+            "#[serde(with = \"::buck2_data::serialize_timestamp\")]",
+        )
+        .field_attribute(
+            "build.bazel.remote.asset.v1.FetchDirectoryResponse.expires_at",
+            "#[serde(with = \"::buck2_data::serialize_timestamp\")]",
+        )
+        .field_attribute(
+            "build.bazel.remote.asset.v1.PushBlobRequest.expire_at",
+            "#[serde(with = \"::buck2_data::serialize_timestamp\")]",
+        )
+        .field_attribute(
+            "build.bazel.remote.asset.v1.PushDirectoryRequest.expire_at",
             "#[serde(with = \"::buck2_data::serialize_timestamp\")]",
         )
         .field_attribute(
