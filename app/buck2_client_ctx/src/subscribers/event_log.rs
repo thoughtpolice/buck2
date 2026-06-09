@@ -14,6 +14,7 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 use buck2_common::argv::SanitizedArgv;
+use buck2_common::init::LogUploadMethod;
 use buck2_event_log::write::WriteEventLog;
 use buck2_events::BuckEvent;
 use buck2_fs::paths::abs_norm_path::AbsNormPathBuf;
@@ -40,6 +41,7 @@ impl EventLog {
         start_time: SystemTime,
         log_size_counter_bytes: Option<Arc<AtomicU64>>,
         retained_event_logs: usize,
+        log_upload_method: LogUploadMethod,
     ) -> EventLog {
         Self {
             writer: WriteEventLog::new(
@@ -52,6 +54,7 @@ impl EventLog {
                 start_time,
                 log_size_counter_bytes,
                 retained_event_logs,
+                log_upload_method,
             ),
         }
     }
