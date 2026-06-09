@@ -437,7 +437,76 @@ impl ResourceControlConfig {
 pub enum LogDownloadMethod {
     Manifold,
     Curl(String),
+    Command(String),
     None,
+}
+
+/// How the client streams its event log. Read by the client from its own buckconfig on every
+/// command, rather than carried in [`DaemonStartupOptions`]: the daemon never uses it, and a
+/// startup option would make checkouts with different upload commands incompatible daemon
+/// tenants.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LogUploadMethod {
+    Manifold,
+    Command(String),
+    None,
+}
+
+impl LogUploadMethod {
+    pub fn from_buckconfig(config: &LegacyBuckConfig) -> buck2_error::Result<Self> {
+        let log_upload_cmd = config.get(BuckconfigKeyRef {
+            section: "buck2",
+            property: "log_upload_cmd",
+        });
+        if let Some(cmd) = log_upload_cmd {
+            if cmd.is_empty() {
+                Err(buck2_error::buck2_error!(
+                    buck2_error::ErrorTag::Input,
+                    "log_upload_cmd is set but empty"
+                ))
+            } else {
+                Ok(LogUploadMethod::Command(cmd.to_owned()))
+            }
+        } else if cfg!(fbcode_build) && !buck2_core::is_open_source() {
+            Ok(LogUploadMethod::Manifold)
+        } else {
+            Ok(LogUploadMethod::None)
+        }
+    }
+}
+
+/// How `buck2 rage` publishes its report. Client-only, like [`LogUploadMethod`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RageUploadMethod {
+    /// Use Meta-internal pastry/manifold/scribe (fbcode only)
+    Internal,
+    /// Pipe rage output to an external command's stdin
+    Command(String),
+    /// Just print to stdout, no upload
+    None,
+}
+
+impl RageUploadMethod {
+    pub fn from_buckconfig(config: &LegacyBuckConfig) -> buck2_error::Result<Self> {
+        let rage_upload_cmd = config.get(BuckconfigKeyRef {
+            section: "buck2",
+            property: "rage_upload_cmd",
+        });
+        if let Some(cmd) = rage_upload_cmd {
+            if cmd.is_empty() {
+                Err(buck2_error::buck2_error!(
+                    buck2_error::ErrorTag::Input,
+                    "rage_upload_cmd is set but empty"
+                ))
+            } else {
+                Ok(RageUploadMethod::Command(cmd.to_owned()))
+            }
+        } else if cfg!(fbcode_build) && !buck2_core::is_open_source() {
+            Ok(RageUploadMethod::Internal)
+        } else {
+            Ok(RageUploadMethod::None)
+        }
+    }
 }
 
 /// Pagable DICE storage settings, present (`Some`) only when paging is enabled by
@@ -541,8 +610,20 @@ impl DaemonStartupConfig {
 
         let log_download_method = {
             let log_download = &settings.log_download;
+            let log_download_cmd = config.get(BuckconfigKeyRef {
+                section: "buck2",
+                property: "log_download_cmd",
+            });
             if log_download.log_use_manifold(&mut buckconfig)? {
                 LogDownloadMethod::Manifold
+            } else if let Some(cmd) = log_download_cmd {
+                if cmd.is_empty() {
+                    return Err(buck2_error::buck2_error!(
+                        buck2_error::ErrorTag::Input,
+                        "log_download_cmd is empty, but log_use_manifold is false"
+                    ));
+                }
+                LogDownloadMethod::Command(cmd.to_owned())
             } else if let Some(log_url) = log_download.log_url(&mut buckconfig)? {
                 if log_url.is_empty() {
                     return Err(buck2_error::buck2_error!(
@@ -555,6 +636,11 @@ impl DaemonStartupConfig {
                 LogDownloadMethod::None
             }
         };
+
+        // Not startup options (see `LogUploadMethod`), but an empty command should still fail
+        // the command, and the streaming client has nowhere to report it.
+        LogUploadMethod::from_buckconfig(config)?;
+        RageUploadMethod::from_buckconfig(config)?;
 
         let startup_options = DaemonStartupOptions {
             share_dice: config
