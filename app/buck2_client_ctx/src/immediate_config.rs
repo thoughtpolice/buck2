@@ -217,6 +217,7 @@ impl<'a> ImmediateConfigContext<'a> {
         canonicalized_path: AbsNormPathBuf,
         flag: Option<&str>,
     ) -> Result<buck2_common::argv::ArgFileKind, buck2_error::Error> {
+        let is_executable = is_executable_script(&canonicalized_path);
         let is_py = canonicalized_path.extension() == Some("py".as_ref());
         let resolved_path =
             match self.data() {
@@ -228,7 +229,12 @@ impl<'a> ImmediateConfigContext<'a> {
                 }
                 _ => ArgFilePath::External(canonicalized_path),
             };
-        if is_py {
+        if is_executable {
+            Ok(ArgFileKind::Executable(
+                resolved_path,
+                flag.map(ToOwned::to_owned),
+            ))
+        } else if is_py {
             Ok(ArgFileKind::PythonExecutable(
                 resolved_path,
                 flag.map(ToOwned::to_owned),
@@ -237,6 +243,34 @@ impl<'a> ImmediateConfigContext<'a> {
             Ok(ArgFileKind::Path(resolved_path))
         }
     }
+}
+
+/// Buck2 runs an argfile as a program when the file is executable and starts with `#!`.
+/// Requiring both keeps plain argfiles working on filesystems that mark every file executable,
+/// such as DrvFs on WSL. It also keeps non-executable `.py` argfiles with a shebang running
+/// under Python.
+///
+/// Errors count as "not executable", so that reading the file as a plain argfile reports them.
+#[cfg(unix)]
+fn is_executable_script(path: &AbsNormPath) -> bool {
+    use std::io::Read;
+    use std::os::unix::fs::PermissionsExt;
+
+    let check = || -> std::io::Result<bool> {
+        let metadata = std::fs::metadata(path)?;
+        if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+            return Ok(false);
+        }
+        let mut magic = [0; 2];
+        std::fs::File::open(path)?.read_exact(&mut magic)?;
+        Ok(&magic == b"#!")
+    };
+    check().unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable_script(_path: &AbsNormPath) -> bool {
+    false
 }
 
 fn is_paranoid_enabled(path: &AbsPath) -> buck2_error::Result<bool> {
