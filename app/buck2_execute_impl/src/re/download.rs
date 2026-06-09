@@ -18,6 +18,7 @@ use buck2_common::file_ops::metadata::FileDigest;
 use buck2_common::file_ops::metadata::FileMetadata;
 use buck2_common::file_ops::metadata::Symlink;
 use buck2_common::file_ops::metadata::TrackedFileDigest;
+use buck2_core::content_hash::ContentBasedPathHash;
 use buck2_core::fs::artifact_path_resolver::ArtifactFs;
 use buck2_core::fs::buck_out_path::BuildArtifactPath;
 use buck2_core::fs::project_rel_path::ProjectRelativePathBuf;
@@ -47,11 +48,13 @@ use buck2_execute::execute::result::CommandExecutionResult;
 use buck2_execute::materialize::materializer::CasDownloadInfo;
 use buck2_execute::materialize::materializer::DeclareArtifactPayload;
 use buck2_execute::materialize::materializer::Materializer;
+use buck2_execute::materialize::materializer::WriteRequest;
 use buck2_execute::re::action_identity::ReActionIdentity;
 use buck2_execute::re::error::RemoteExecutionError;
 use buck2_execute::re::manager::ManagedRemoteExecutionClient;
 use buck2_execute::re::output_trees_download_config::OutputTreesDownloadConfig;
 use buck2_execute::re::remote_action_result::RemoteActionResult;
+use buck2_execute::re::streams::RemoteCommandStdStreams;
 use buck2_fs::paths::RelativePathBuf;
 use buck2_fs::paths::forward_rel_path::ForwardRelativePath;
 use buck2_hash::BuckIndexMap;
@@ -141,7 +144,22 @@ pub async fn download_action_results<'a>(
     );
 
     let (download, std_streams) = future::join(download, std_streams).await;
-    let (manager, outputs) = download?;
+    let (manager, mut outputs) = download?;
+
+    // This runs before the exit code check so that a failed action's captured streams can
+    // still be materialized for `outputs_for_error_handler` below.
+    if let Err(e) = synthesize_capture_artifacts(
+        request,
+        &std_streams,
+        materializer,
+        artifact_fs,
+        digest_config,
+        &mut outputs,
+    )
+    .await
+    {
+        return DownloadResult::Result(manager.error("stdout_stderr_capture_failed", e));
+    }
 
     let res = match action_exit_code {
         0 => manager.success(
@@ -213,6 +231,88 @@ pub async fn download_action_results<'a>(
     };
 
     DownloadResult::Result(res)
+}
+
+/// Write the remote command's std streams to their requested capture output artifacts
+/// (the `stdout`/`stderr` parameters of `ctx.actions.run()`).
+///
+/// The capture artifacts are declared outputs of the action, but the remote command does not
+/// physically produce them, so they are synthesized here from the std streams of the action
+/// result. Because this runs on every downloaded result, it also covers action cache and
+/// remote dep file cache hits. If a previous local execution uploaded its result to the cache,
+/// the capture file is a real output file in the action result and has already been extracted,
+/// in which case there is nothing to do.
+async fn synthesize_capture_artifacts(
+    request: &CommandExecutionRequest,
+    std_streams: &RemoteCommandStdStreams,
+    materializer: &dyn Materializer,
+    artifact_fs: &ArtifactFs,
+    digest_config: DigestConfig,
+    outputs: &mut BuckIndexMap<CommandExecutionOutput, ArtifactValue>,
+) -> buck2_error::Result<()> {
+    for (capture_path, is_stdout) in [
+        (request.stdout_artifact(), true),
+        (request.stderr_artifact(), false),
+    ] {
+        let Some(capture_path) = capture_path else {
+            continue;
+        };
+
+        // Use the request's own output entry as the map key, so that key equality with the
+        // other outputs (and the declared-outputs check in the action executor) is exact.
+        let Some(key) = request
+            .outputs()
+            .find(|o| match o {
+                CommandExecutionOutputRef::BuildArtifact { path, .. } => *path == capture_path,
+                _ => false,
+            })
+            .map(|o| o.cloned())
+        else {
+            return Err(buck2_error::internal_error!(
+                "capture artifact `{}` is not an output of the command",
+                capture_path
+            ));
+        };
+
+        if outputs.contains_key(&key) {
+            continue;
+        }
+
+        let content = if is_stdout {
+            std_streams.stdout_bytes().await?
+        } else {
+            std_streams.stderr_bytes().await?
+        };
+
+        let content_based_path_hash = if capture_path.is_content_based_path() {
+            let digest =
+                TrackedFileDigest::from_content(&content, digest_config.cas_digest_config());
+            Some(ContentBasedPathHash::new(digest.raw_digest().as_bytes())?)
+        } else {
+            None
+        };
+        let path = artifact_fs.resolve_build(capture_path, content_based_path_hash.as_ref())?;
+        let configuration_path =
+            materializer.maybe_eager_configuration_path(artifact_fs, capture_path)?;
+
+        let value = materializer
+            .declare_write(Box::new(move || {
+                Ok(vec![WriteRequest {
+                    path,
+                    content,
+                    is_executable: false,
+                    configuration_path,
+                }])
+            }))
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| buck2_error::internal_error!("Write did not execute"))?;
+
+        outputs.insert(key, value);
+    }
+
+    Ok(())
 }
 
 async fn materialize_failed_build_outputs(
