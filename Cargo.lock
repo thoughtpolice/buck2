@@ -2606,6 +2606,7 @@ dependencies = [
  "buck2_fs",
  "buck2_hash",
  "buck2_resource_control",
+ "buck2_sandbox",
  "buck2_util",
  "buck2_worker_proto",
  "buck2_wrapper_common",
@@ -2749,6 +2750,7 @@ dependencies = [
  "buck2_fs",
  "buck2_grpc",
  "buck2_resource_control",
+ "buck2_sandbox",
  "buck2_util",
  "dupe",
  "futures 0.3.34",
@@ -3285,6 +3287,20 @@ dependencies = [
  "ref-cast",
  "tokio",
  "tokio-util 0.7.19",
+]
+
+[[package]]
+name = "buck2_sandbox"
+version = "0.1.0"
+dependencies = [
+ "buck2_core",
+ "buck2_error",
+ "landlock",
+ "libc",
+ "nix 0.31.3",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -7007,6 +7023,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf36173d4167ed999940f804952e6b08197cae5ad5d572eb4db150ce8ad5d58f"
 
 [[package]]
+name = "landlock"
+version = "0.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cca98e95f35b29d469dade6724c6f96cec9236640f745a0e99b0334ec320ab1"
+dependencies = [
+ "enumflags2",
+ "libc",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "lazy-regex"
 version = "3.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9677,6 +9704,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_path_to_error",
+ "shlex",
  "tracing",
  "tracing-subscriber",
  "whoami",
