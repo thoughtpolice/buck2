@@ -226,14 +226,31 @@ pub async fn run_internal_test(
                         .await
                         .buck_error_context("Failed to report test result")?;
                 } else {
+                    let execution_output = format_execution_output(&result.stdout, &result.stderr);
                     for res in result_entries {
+                        let details = res.details.unwrap_or_else(|| match &res.status {
+                            TestStatus::PASS
+                            | TestStatus::FAIL
+                            | TestStatus::FATAL
+                            | TestStatus::TIMEOUT
+                            | TestStatus::INFRA_FAILURE
+                            | TestStatus::UNKNOWN
+                            | TestStatus::LISTING_FAILED => execution_output.clone(),
+                            TestStatus::SKIP
+                            | TestStatus::OMITTED
+                            | TestStatus::RERUN
+                            | TestStatus::LISTING_SUCCESS => String::new(),
+                        });
                         let test_result = TestResult {
                             target: target_handle,
                             name: res.name,
                             status: res.status,
                             msg: res.message,
                             duration: res.duration,
-                            details: res.details.unwrap_or_default(),
+                            // Keep parser-provided diagnostics, but fall back to raw
+                            // execution output for actionable results so
+                            // `--print-passing-details` works for the internal runner too.
+                            details,
                             max_memory_used_bytes: result.max_memory_used_bytes,
                         };
                         orchestrator
