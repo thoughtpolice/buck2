@@ -323,6 +323,13 @@ pub struct BuckTestOrchestrator<'a: 'static> {
     cancellations: &'a CancellationContext,
     re_client: Arc<remote_storage::ReClientWithCache>,
     internal_runner_config: InternalRunnerConfig,
+    /// Whether `Drop` reports an incomplete stream into `results_channel`.
+    /// Disarmed for the in-process internal runner's orchestrator: it shares
+    /// the channel with the orchestrator serving the external executor, and
+    /// the external executor owns the end-of-tests handshake, so dropping the
+    /// internal orchestrator without `end_of_test_results` is the normal
+    /// flow, not an error.
+    report_incomplete_on_drop: bool,
 }
 
 impl<'a> BuckTestOrchestrator<'a> {
@@ -369,7 +376,16 @@ impl<'a> BuckTestOrchestrator<'a> {
             cancellations,
             re_client,
             internal_runner_config,
+            report_incomplete_on_drop: true,
         }
+    }
+
+    /// See `report_incomplete_on_drop`. Used for the internal runner's
+    /// orchestrator, whose drop without `end_of_test_results` must not poison
+    /// the results channel shared with the external executor's orchestrator.
+    pub(crate) fn disarm_incomplete_drop_report(mut self) -> Self {
+        self.report_incomplete_on_drop = false;
+        self
     }
 
     async fn require_alive(
@@ -2040,6 +2056,9 @@ impl BuckTestOrchestrator<'_> {
 
 impl Drop for BuckTestOrchestrator<'_> {
     fn drop(&mut self) {
+        if !self.report_incomplete_on_drop {
+            return;
+        }
         // If we didn't close the sender yet, then notify the receiver that our stream is
         // incomplete.
         let _ignored = self
