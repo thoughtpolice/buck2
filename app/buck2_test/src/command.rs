@@ -132,6 +132,10 @@ struct TestOutcome {
     executor_stdout: String,
     executor_stderr: String,
     build_target_result: BuildTargetResult,
+    /// Whether any target ran via the in-process internal runner. Internal
+    /// runner results are not covered by the external executor's exit code,
+    /// so they are folded into the verdict separately.
+    internal_runner_ran: bool,
 }
 
 impl TestOutcome {
@@ -550,7 +554,26 @@ async fn test(
     );
 
     // TODO(bobyf) remap exit code for buck reserved exit code
-    let executor_exit_code = test_outcome.exit_code()?;
+    let mut executor_exit_code = test_outcome.exit_code()?;
+
+    // The external executor's exit code only covers the tests it ran. Tests
+    // executed by the in-process internal runner report through the results
+    // channel instead, so fold their failures into the verdict here, using
+    // the tpx RunVerdict convention (32 = tests failed). Gated on the
+    // internal runner having run so an external executor that legitimately
+    // reports a passing verdict alongside failed attempts (e.g. flaky
+    // retries) is left alone.
+    if test_outcome.internal_runner_ran && executor_exit_code == 0 {
+        let statuses = &test_outcome.executor_report.statuses;
+        if statuses.failed.count > 0
+            || statuses.fatals.count > 0
+            || statuses.timed_out.count > 0
+            || statuses.infra_failure.count > 0
+            || statuses.listing_failed.count > 0
+        {
+            executor_exit_code = 32;
+        }
+    }
 
     // Filtering out individual types might not be best here. While we just have 1 non-build
     // error that seems OK, but if we add more we should reconsider (we could add a type on all
@@ -844,6 +867,8 @@ async fn test_targets(
                     std::mem::replace(&mut driver.build_target_result, BuildTargetResult::new());
                 drop(driver);
 
+                let internal_runner_ran = internal_orchestrator.initialized();
+
                 // Drop internal runner resources so their senders don't
                 // keep the results channel open during try_fold.
                 drop(internal_orchestrator);
@@ -887,7 +912,7 @@ async fn test_targets(
                 build_target_result.extend(error_target_result);
 
                 // And finally return our results;
-                buck2_error::Ok((build_target_result, test_statuses))
+                buck2_error::Ok((build_target_result, test_statuses, internal_runner_ran))
             },
         )
     });
@@ -916,7 +941,7 @@ async fn test_targets(
     )));
 
     // TODO(bobyf, torozco) we can use cancellation handle here instead of liveliness observer
-    let (build_target_result, executor_report) = test_server
+    let (build_target_result, executor_report, internal_runner_ran) = test_server
         .await
         .buck_error_context("Failed to collect executor report")??;
 
@@ -938,6 +963,7 @@ async fn test_targets(
         executor_stderr: executor_output.stderr,
         executor_report,
         build_target_result,
+        internal_runner_ran,
     })
 }
 
@@ -1590,7 +1616,8 @@ async fn test_target<'a, 'e>(
                         driver_state.internal_runner_config.clone(),
                     )
                     .await
-                    .buck_error_context("Failed to create internal BuckTestOrchestrator")?;
+                    .buck_error_context("Failed to create internal BuckTestOrchestrator")?
+                    .disarm_incomplete_drop_report();
                     Ok::<_, buck2_error::Error>(
                         Arc::new(orchestrator) as Arc<dyn TestOrchestrator + Send + Sync>
                     )
