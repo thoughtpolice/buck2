@@ -164,7 +164,8 @@ pub struct InternalRunnerTestInfoGen<V: ValueLifetimeless> {
     ///         "status": str              — "PASS", "FAIL", "SKIP", "TIMEOUT", "OMITTED", etc.
     ///         "message": str | None      — failure/skip reason
     ///         "duration": float | None      — duration of this test case
-    ///         "details": str | None      — full diagnostic output
+    ///         "details": str | None      — full diagnostic output; raw stdout/stderr is used
+    ///                                        for pass/failure results when omitted
     ///     """
     /// ```
     parse_test_result: ValueOfUncheckedGeneric<
