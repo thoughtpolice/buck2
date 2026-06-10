@@ -606,16 +606,6 @@ pub fn format_test_result(
     } = test_result;
     let status = TestStatus::try_from(*status)?;
 
-    // Pass results normally have no details, unless the --print-passing-details is set.
-    // Do not display anything for passing tests unless verbosity is high or details are present
-    // to avoid cluttering the UI with unimportant test results.
-    if matches!(&status, TestStatus::PASS | TestStatus::LISTING_SUCCESS)
-        && details.is_empty()
-        && !verbosity.print_all_commands()
-    {
-        return Ok(None);
-    }
-
     let prefix = match status {
         TestStatus::FAIL => Span::new_styled("✗ Fail".to_owned().red()),
         TestStatus::SKIP => Span::new_styled("↷ Skip".to_owned().cyan()),
@@ -1143,6 +1133,55 @@ impl<'a> CriticalPathEntryDisplay<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_result(status: TestStatus, details: &str) -> buck2_data::TestResult {
+        buck2_data::TestResult {
+            name: "example_test".to_owned(),
+            status: status.try_into().unwrap(),
+            msg: None,
+            duration: None,
+            details: details.to_owned(),
+            target_label: None,
+            max_memory_used_bytes: None,
+        }
+    }
+
+    #[test]
+    fn passing_test_without_details_still_has_summary() {
+        let lines = format_test_result(&test_result(TestStatus::PASS, ""), Verbosity::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(1, lines.0.len());
+    }
+
+    #[test]
+    fn passing_test_details_are_opt_in() {
+        let result = test_result(TestStatus::PASS, "test stdout");
+
+        let default_lines = format_test_result(&result, Verbosity::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(1, default_lines.0.len());
+
+        let verbose_lines = format_test_result(
+            &result,
+            Verbosity::try_from_cli("test_passing_details").unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(2, verbose_lines.0.len());
+    }
+
+    #[test]
+    fn failing_test_details_are_shown_by_default() {
+        let lines = format_test_result(
+            &test_result(TestStatus::FAIL, "test stderr"),
+            Verbosity::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(2, lines.0.len());
+    }
 
     #[test]
     fn removes_color_characters() {
