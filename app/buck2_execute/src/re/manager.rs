@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use allocative::Allocative;
 use async_trait::async_trait;
+use buck2_common::cas_digest::DigestAlgorithm;
 use buck2_core::async_once_cell::AsyncOnceCell;
 use buck2_core::buck2_env;
 use buck2_core::execution_types::executor_config::MetaInternalExtraParams;
@@ -57,6 +58,7 @@ use crate::materialize::utils::dynamic_priority_handle::DynamicPriorityHandle;
 use crate::re::action_identity::ReActionIdentity;
 use crate::re::client::ActionCacheWriteType;
 use crate::re::client::ExecuteResponseOrCancelled;
+use crate::re::client::RemoteAssetResponse;
 use crate::re::client::RemoteExecutionClient;
 use crate::re::metadata::RemoteExecutionMetadataExt;
 use crate::re::re_get_session_id::ReGetSessionId;
@@ -491,6 +493,28 @@ impl ManagedRemoteExecutionClient {
             .get()
             .await?
             .download_blob(digest, self.use_case)
+            .await
+    }
+
+    pub async fn fetch_remote_asset(
+        &self,
+        uris: Vec<String>,
+        qualifiers: Vec<(String, String)>,
+        is_directory: bool,
+        digest_algorithm: DigestAlgorithm,
+        timeout: Option<Duration>,
+    ) -> buck2_error::Result<RemoteAssetResponse> {
+        self.lock()?
+            .get()
+            .await?
+            .fetch_remote_asset(
+                uris,
+                qualifiers,
+                is_directory,
+                digest_algorithm,
+                timeout,
+                self.use_case,
+            )
             .await
     }
 
