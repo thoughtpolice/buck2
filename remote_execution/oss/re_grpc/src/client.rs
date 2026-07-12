@@ -2147,8 +2147,14 @@ mod tests {
     use core::sync::atomic::Ordering;
     use std::sync::atomic::AtomicU16;
 
+    use buck2_re_configuration::Buck2OssReConfiguration;
+    use re_grpc_proto::build::bazel::remote::asset::v1::FetchBlobResponse;
+    use re_grpc_proto::build::bazel::remote::asset::v1::FetchDirectoryResponse;
+    use re_grpc_proto::build::bazel::remote::asset::v1::fetch_server;
+    use re_grpc_proto::build::bazel::remote::asset::v1::fetch_server::FetchServer;
     use re_grpc_proto::build::bazel::remote::execution::v2::batch_read_blobs_response;
     use re_grpc_proto::build::bazel::remote::execution::v2::batch_update_blobs_response;
+    use tonic::transport::Server;
 
     use super::*;
 
@@ -2160,6 +2166,200 @@ mod tests {
             find_missing_blobs_batch_size: 100,
             batch_read_zstd: false,
         }
+    }
+
+    #[derive(Default)]
+    struct TestRemoteAssetService;
+
+    fn ok_status() -> Status {
+        Status {
+            code: Code::Ok as i32,
+            ..Default::default()
+        }
+    }
+
+    #[tonic::async_trait]
+    impl fetch_server::Fetch for TestRemoteAssetService {
+        async fn fetch_blob(
+            &self,
+            request: tonic::Request<FetchBlobRequest>,
+        ) -> Result<tonic::Response<FetchBlobResponse>, tonic::Status> {
+            let request = request.into_inner();
+            if request.instance_name != "test-instance"
+                || request.digest_function != 1
+                || request.timeout.as_ref().map(|timeout| timeout.seconds) != Some(7)
+                || request.qualifiers
+                    != vec![Qualifier {
+                        name: "checksum.sri".to_owned(),
+                        value: "sha256-test".to_owned(),
+                    }]
+            {
+                return Err(tonic::Status::invalid_argument(
+                    "unexpected FetchBlob request",
+                ));
+            }
+
+            match request.uris.first().map(String::as_str) {
+                Some("inline-error") => Ok(tonic::Response::new(FetchBlobResponse {
+                    status: Some(Status {
+                        code: Code::InvalidArgument as i32,
+                        message: "bad asset".to_owned(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })),
+                Some("missing-digest") => Ok(tonic::Response::new(FetchBlobResponse {
+                    status: Some(ok_status()),
+                    digest_function: 1,
+                    ..Default::default()
+                })),
+                _ => Ok(tonic::Response::new(FetchBlobResponse {
+                    status: Some(ok_status()),
+                    uri: request.uris[0].clone(),
+                    expires_at: Some(prost_types::Timestamp {
+                        seconds: 123,
+                        nanos: 456,
+                    }),
+                    blob_digest: Some(Digest {
+                        hash: "a".repeat(64),
+                        size_bytes: 42,
+                    }),
+                    digest_function: 1,
+                    ..Default::default()
+                })),
+            }
+        }
+
+        async fn fetch_directory(
+            &self,
+            request: tonic::Request<FetchDirectoryRequest>,
+        ) -> Result<tonic::Response<FetchDirectoryResponse>, tonic::Status> {
+            let request = request.into_inner();
+            if request.instance_name != "test-instance"
+                || request.uris != ["https://example.com/repo.git"]
+                || request.digest_function != 9
+            {
+                return Err(tonic::Status::invalid_argument(
+                    "unexpected FetchDirectory request",
+                ));
+            }
+            Ok(tonic::Response::new(FetchDirectoryResponse {
+                status: Some(ok_status()),
+                uri: request.uris[0].clone(),
+                root_directory_digest: Some(Digest {
+                    hash: "b".repeat(64),
+                    size_bytes: 84,
+                }),
+                digest_function: 9,
+                ..Default::default()
+            }))
+        }
+    }
+
+    async fn remote_asset_test_client() -> anyhow::Result<(REClient, tokio::task::JoinHandle<()>)> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?.to_string();
+        let incoming = futures::stream::unfold(listener, |listener| async move {
+            let item = listener.accept().await.map(|(stream, _)| stream);
+            Some((item, listener))
+        });
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_service(FetchServer::new(TestRemoteAssetService))
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        let client = REClientBuilder::build_and_connect(
+            &Buck2OssReConfiguration {
+                cas_address: Some(address.clone()),
+                engine_address: Some(address.clone()),
+                action_cache_address: Some(address),
+                tls: false,
+                capabilities: Some(false),
+                instance_name: Some("test-instance".to_owned()),
+                ..Default::default()
+            },
+            1,
+        )
+        .await?;
+        Ok((client, server))
+    }
+
+    fn blob_asset_request(uri: &str) -> RemoteAssetRequest {
+        RemoteAssetRequest {
+            kind: RemoteAssetKind::Blob,
+            uris: vec![uri.to_owned()],
+            qualifiers: vec![RemoteAssetQualifier {
+                name: "checksum.sri".to_owned(),
+                value: "sha256-test".to_owned(),
+            }],
+            digest_function: 1,
+            timeout_seconds: Some(7),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_remote_asset_fetch() -> anyhow::Result<()> {
+        let (client, server) = remote_asset_test_client().await?;
+
+        let blob = client
+            .fetch_remote_asset(
+                RemoteExecutionMetadata::default(),
+                blob_asset_request("blob"),
+            )
+            .await?;
+        assert_eq!(blob.digest.hash, "a".repeat(64));
+        assert_eq!(blob.digest.size_in_bytes, 42);
+        assert_eq!(blob.digest_function, 1);
+        assert_eq!(blob.expires_at.unwrap().seconds, 123);
+
+        let directory = client
+            .fetch_remote_asset(
+                RemoteExecutionMetadata::default(),
+                RemoteAssetRequest {
+                    kind: RemoteAssetKind::Directory,
+                    uris: vec!["https://example.com/repo.git".to_owned()],
+                    qualifiers: vec![],
+                    digest_function: 9,
+                    timeout_seconds: None,
+                },
+            )
+            .await?;
+        assert_eq!(directory.digest.hash, "b".repeat(64));
+        assert_eq!(directory.digest.size_in_bytes, 84);
+        assert_eq!(directory.digest_function, 9);
+
+        let inline_error = client
+            .fetch_remote_asset(
+                RemoteExecutionMetadata::default(),
+                blob_asset_request("inline-error"),
+            )
+            .await;
+        let inline_error = match inline_error {
+            Ok(_) => panic!("inline Remote Asset error unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert!(inline_error.to_string().contains("bad asset"));
+
+        let missing_digest = client
+            .fetch_remote_asset(
+                RemoteExecutionMetadata::default(),
+                blob_asset_request("missing-digest"),
+            )
+            .await;
+        let missing_digest = match missing_digest {
+            Ok(_) => panic!("Remote Asset response without a digest unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert!(
+            missing_digest
+                .to_string()
+                .contains("did not contain a digest")
+        );
+
+        server.abort();
+        Ok(())
     }
 
     #[tokio::test]
