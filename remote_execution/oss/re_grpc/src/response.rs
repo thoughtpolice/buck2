@@ -133,6 +133,13 @@ pub struct DownloadResponse {
 }
 
 #[derive(Clone, Default)]
+pub struct RemoteAssetResponse {
+    pub digest: TDigest,
+    pub expires_at: Option<TTimestamp>,
+    pub digest_function: i32,
+}
+
+#[derive(Clone, Default)]
 pub struct InlinedDigestWithStatus {
     pub digest: TDigest,
     pub status: TStatus,
