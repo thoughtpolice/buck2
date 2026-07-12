@@ -17,6 +17,7 @@ use std::time::Instant;
 
 use allocative::Allocative;
 use anyhow::Context;
+use buck2_common::cas_digest::DigestAlgorithm;
 use buck2_core::buck2_env;
 use buck2_core::execution_types::executor_config::MetaInternalExtraParams;
 use buck2_core::execution_types::executor_config::RemoteExecutorDependency;
@@ -68,6 +69,12 @@ use remote_execution::NamedDigestWithPermissions;
 use remote_execution::OperationMetadata;
 use remote_execution::REClient;
 use remote_execution::REClientBuilder;
+#[cfg(not(fbcode_build))]
+use remote_execution::RemoteAssetKind as ReRemoteAssetKind;
+#[cfg(not(fbcode_build))]
+use remote_execution::RemoteAssetQualifier as ReRemoteAssetQualifier;
+#[cfg(not(fbcode_build))]
+use remote_execution::RemoteAssetRequest as ReRemoteAssetRequest;
 use remote_execution::RemoteExecutionMetadata;
 #[cfg(fbcode_build)]
 use remote_execution::RemoteFetchPolicy;
@@ -155,6 +162,25 @@ enum ChunkDownloadResult {
 #[error("Materialization cancelled")]
 #[buck2(tag = MaterializationCancelled)]
 struct MaterializationCancelled;
+
+#[derive(Clone, Debug)]
+pub struct RemoteAssetResponse {
+    pub digest: TDigest,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[cfg(not(fbcode_build))]
+fn remote_asset_digest_function(algorithm: DigestAlgorithm) -> buck2_error::Result<i32> {
+    match algorithm {
+        DigestAlgorithm::Sha256 => Ok(1),
+        DigestAlgorithm::Sha1 => Ok(2),
+        DigestAlgorithm::Blake3 => Ok(9),
+        DigestAlgorithm::Blake3Keyed | DigestAlgorithm::Blake3KeyedTest => Err(buck2_error!(
+            buck2_error::ErrorTag::Input,
+            "Remote Asset does not support Buck's keyed BLAKE3 digest algorithm"
+        )),
+    }
+}
 
 #[derive(Clone, Dupe, Allocative)]
 pub struct RemoteExecutionClient {
@@ -405,6 +431,28 @@ impl RemoteExecutionClient {
                 self.data.local_cache.update(&r.1);
                 r.0
             })
+    }
+
+    pub async fn fetch_remote_asset(
+        &self,
+        uris: Vec<String>,
+        qualifiers: Vec<(String, String)>,
+        is_directory: bool,
+        digest_algorithm: DigestAlgorithm,
+        timeout: Option<Duration>,
+        use_case: RemoteExecutorUseCase,
+    ) -> buck2_error::Result<RemoteAssetResponse> {
+        self.data
+            .downloads
+            .op(self.data.client.fetch_remote_asset(
+                uris,
+                qualifiers,
+                is_directory,
+                digest_algorithm,
+                timeout,
+                use_case,
+            ))
+            .await
     }
 
     pub async fn upload_blob(
@@ -1827,6 +1875,103 @@ impl RemoteExecutionClientImpl {
             .ok_or_else(|| internal_error!("No digest was returned in request for {digest}"))
     }
 
+    async fn fetch_remote_asset(
+        &self,
+        uris: Vec<String>,
+        qualifiers: Vec<(String, String)>,
+        is_directory: bool,
+        digest_algorithm: DigestAlgorithm,
+        timeout: Option<Duration>,
+        use_case: RemoteExecutorUseCase,
+    ) -> buck2_error::Result<RemoteAssetResponse> {
+        #[cfg(fbcode_build)]
+        {
+            let _ = (
+                uris,
+                qualifiers,
+                is_directory,
+                digest_algorithm,
+                timeout,
+                use_case,
+            );
+            unimplemented!("Remote Asset is not implemented for fbcode builds")
+        }
+
+        #[cfg(not(fbcode_build))]
+        {
+            let requested_digest_function = remote_asset_digest_function(digest_algorithm)?;
+            let response = with_error_handler(
+                "fetch_remote_asset",
+                self.get_session_id(),
+                self.client()
+                    .fetch_remote_asset(
+                        use_case.metadata(None),
+                        ReRemoteAssetRequest {
+                            kind: if is_directory {
+                                ReRemoteAssetKind::Directory
+                            } else {
+                                ReRemoteAssetKind::Blob
+                            },
+                            uris,
+                            qualifiers: qualifiers
+                                .into_iter()
+                                .map(|(name, value)| ReRemoteAssetQualifier { name, value })
+                                .collect(),
+                            digest_function: requested_digest_function,
+                            timeout_seconds: timeout.map(|timeout| timeout.as_secs()),
+                        },
+                    )
+                    .await,
+            )
+            .await?;
+
+            let actual_digest_function = match response.digest_function {
+                0 => 1,
+                value => value,
+            };
+            if actual_digest_function != requested_digest_function {
+                return Err(buck2_error!(
+                    buck2_error::ErrorTag::Tier0,
+                    "Remote Asset returned digest function {} after Buck requested {}",
+                    actual_digest_function,
+                    requested_digest_function,
+                ));
+            }
+            if response.digest.size_in_bytes < 0 {
+                return Err(buck2_error!(
+                    buck2_error::ErrorTag::Tier0,
+                    "Remote Asset returned a negative digest size: {}",
+                    response.digest.size_in_bytes,
+                ));
+            }
+
+            let expires_at = response
+                .expires_at
+                .map(|timestamp| {
+                    let nanos = timestamp.nanos.try_into().map_err(|_| {
+                        internal_error!(
+                            "Remote Asset returned an invalid expiration timestamp: {}.{}",
+                            timestamp.seconds,
+                            timestamp.nanos,
+                        )
+                    })?;
+                    DateTime::from_timestamp(timestamp.seconds, nanos).ok_or_else(|| {
+                        internal_error!(
+                            "Remote Asset returned an invalid expiration timestamp: {}.{}",
+                            timestamp.seconds,
+                            timestamp.nanos,
+                        )
+                    })
+                })
+                .transpose()?;
+
+            Ok(RemoteAssetResponse {
+                digest: response.digest,
+                expires_at,
+            })
+        }
+    }
+
     pub async fn upload_blob(
         &self,
         blob: InlinedBlobWithDigest,
@@ -2087,5 +2232,24 @@ mod tests {
         assert_eq!(it.next(), Some(vec![1, 2]));
         assert_eq!(it.next(), Some(vec![3]));
         assert_eq!(it.next(), None);
+    }
+
+    #[cfg(not(fbcode_build))]
+    #[test]
+    fn test_remote_asset_digest_functions() {
+        assert_eq!(
+            remote_asset_digest_function(DigestAlgorithm::Sha256).unwrap(),
+            1
+        );
+        assert_eq!(
+            remote_asset_digest_function(DigestAlgorithm::Sha1).unwrap(),
+            2
+        );
+        assert_eq!(
+            remote_asset_digest_function(DigestAlgorithm::Blake3).unwrap(),
+            9
+        );
+        assert!(remote_asset_digest_function(DigestAlgorithm::Blake3Keyed).is_err());
+        assert!(remote_asset_digest_function(DigestAlgorithm::Blake3KeyedTest).is_err());
     }
 }
