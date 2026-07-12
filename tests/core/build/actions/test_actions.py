@@ -302,6 +302,36 @@ async def test_download_file(buck: Buck) -> None:
 
 
 @buck_test(data_dir="actions")
+async def test_download_remote_asset_analysis(buck: Buck) -> None:
+    file_query = await buck.aquery(
+        "//remote_asset:valid_file",
+        "-a",
+        "kind",
+        "-a",
+        "category",
+        "-a",
+        "buck.all_outputs_are_content_based",
+    )
+    assert '"kind": "remoteasset"' in file_query.stdout
+    assert '"category": "remote_asset"' in file_query.stdout
+    assert '"buck.all_outputs_are_content_based": "true"' in file_query.stdout
+
+    directory_query = await buck.aquery(
+        "//remote_asset:valid_directory", "-a", "kind", "-a", "category"
+    )
+    assert '"kind": "remoteasset"' in directory_query.stdout
+
+    await expect_failure(
+        buck.aquery("//remote_asset:empty_urls"),
+        stderr_regex="download_remote_asset requires at least one URL",
+    )
+    await expect_failure(
+        buck.aquery("//remote_asset:executable_directory"),
+        stderr_regex="is_executable is only valid for Remote Asset file outputs",
+    )
+
+
+@buck_test(data_dir="actions")
 async def test_download_file_timeout_after_retries(buck: Buck) -> None:
     routes = web.RouteTableDef()
 
