@@ -39,6 +39,10 @@ use futures::stream::TryStreamExt;
 use gazebo::prelude::*;
 use lru::LruCache;
 use prost::Message;
+use re_grpc_proto::build::bazel::remote::asset::v1::FetchBlobRequest;
+use re_grpc_proto::build::bazel::remote::asset::v1::FetchDirectoryRequest;
+use re_grpc_proto::build::bazel::remote::asset::v1::Qualifier;
+use re_grpc_proto::build::bazel::remote::asset::v1::fetch_client::FetchClient;
 use re_grpc_proto::build::bazel::remote::execution::v2::ActionResult;
 use re_grpc_proto::build::bazel::remote::execution::v2::BatchReadBlobsRequest;
 use re_grpc_proto::build::bazel::remote::execution::v2::BatchReadBlobsResponse;
@@ -153,6 +157,14 @@ fn ttimestamp_from(ts: Option<::prost_types::Timestamp>) -> TTimestamp {
             ..Default::default()
         },
         None => TTimestamp::unix_epoch(),
+    }
+}
+
+fn ttimestamp_from_value(timestamp: ::prost_types::Timestamp) -> TTimestamp {
+    TTimestamp {
+        seconds: timestamp.seconds,
+        nanos: timestamp.nanos,
+        ..Default::default()
     }
 }
 
@@ -708,6 +720,91 @@ impl REClient {
         .await
     }
 
+    pub async fn fetch_remote_asset(
+        &self,
+        metadata: RemoteExecutionMetadata,
+        request: RemoteAssetRequest,
+    ) -> anyhow::Result<RemoteAssetResponse> {
+        let qualifiers = request
+            .qualifiers
+            .iter()
+            .map(|qualifier| Qualifier {
+                name: qualifier.name.clone(),
+                value: qualifier.value.clone(),
+            })
+            .collect::<Vec<_>>();
+        let timeout = request
+            .timeout_seconds
+            .map(|seconds| prost_types::Duration {
+                seconds: seconds.try_into().unwrap_or(i64::MAX),
+                nanos: 0,
+            });
+
+        retry(|| async {
+            match request.kind {
+                RemoteAssetKind::Blob => {
+                    let response = self
+                        .remote_asset_client()
+                        .await?
+                        .fetch_blob(with_re_metadata(
+                            FetchBlobRequest {
+                                instance_name: self.instance_name.as_str().to_owned(),
+                                timeout,
+                                oldest_content_accepted: None,
+                                uris: request.uris.clone(),
+                                qualifiers: qualifiers.clone(),
+                                digest_function: request.digest_function,
+                            },
+                            metadata.clone(),
+                            self.runtime_opts.use_fbcode_metadata,
+                        ))
+                        .await?
+                        .into_inner();
+
+                    check_status(response.status.unwrap_or_default())?;
+                    let digest = response
+                        .blob_digest
+                        .context("Remote Asset FetchBlob response did not contain a digest")?;
+                    Ok(RemoteAssetResponse {
+                        digest: tdigest_from(digest),
+                        expires_at: response.expires_at.map(ttimestamp_from_value),
+                        digest_function: response.digest_function,
+                    })
+                }
+                RemoteAssetKind::Directory => {
+                    let response = self
+                        .remote_asset_client()
+                        .await?
+                        .fetch_directory(with_re_metadata(
+                            FetchDirectoryRequest {
+                                instance_name: self.instance_name.as_str().to_owned(),
+                                timeout,
+                                oldest_content_accepted: None,
+                                uris: request.uris.clone(),
+                                qualifiers: qualifiers.clone(),
+                                digest_function: request.digest_function,
+                            },
+                            metadata.clone(),
+                            self.runtime_opts.use_fbcode_metadata,
+                        ))
+                        .await?
+                        .into_inner();
+
+                    check_status(response.status.unwrap_or_default())?;
+                    let digest = response.root_directory_digest.context(
+                        "Remote Asset FetchDirectory response did not contain a root directory digest",
+                    )?;
+                    Ok(RemoteAssetResponse {
+                        digest: tdigest_from(digest),
+                        expires_at: response.expires_at.map(ttimestamp_from_value),
+                        digest_function: response.digest_function,
+                    })
+                }
+            }
+        })
+        .await
+    }
+
     pub async fn execute_with_progress(
         &self,
         metadata: RemoteExecutionMetadata,
@@ -1089,6 +1186,14 @@ impl REClient {
     async fn action_cache_client(&self) -> anyhow::Result<ActionCacheClient<GrpcService>> {
         let channel = self.pool.get(&self.action_cache_address).await?;
         Ok(ActionCacheClient::new(InterceptedService::new(
+            channel,
+            self.interceptor.dupe(),
+        )))
+    }
+
+    async fn remote_asset_client(&self) -> anyhow::Result<FetchClient<GrpcService>> {
+        let channel = self.pool.get(&self.cas_address).await?;
+        Ok(FetchClient::new(InterceptedService::new(
             channel,
             self.interceptor.dupe(),
         )))
