@@ -60,6 +60,7 @@ use buck2_core::package::PackageLabelWithModifiers;
 use buck2_core::pattern::pattern::Modifiers;
 use buck2_core::pattern::pattern::ModifiersError;
 use buck2_core::pattern::pattern::PackageSpec;
+use buck2_core::pattern::pattern::ParsedPattern;
 use buck2_core::pattern::pattern::ProvidersLabelWithModifiers;
 use buck2_core::pattern::pattern_type::ConfiguredProvidersPatternExtra;
 use buck2_core::pattern::pattern_type::ProvidersPatternExtra;
@@ -98,6 +99,7 @@ use buck2_test_api::data::TestResult;
 use buck2_test_api::data::TestStatus;
 use buck2_test_api::protocol::TestExecutor;
 use buck2_test_api::protocol::TestOrchestrator;
+use dice::DiceComputations;
 use dice::DiceTransaction;
 use dice::LinearRecomputeDiceComputations;
 use dice_futures::cancellation::CancellationContext;
@@ -470,6 +472,49 @@ async fn test(
     let mut test_executor_args = request.test_executor_args.clone();
     test_executor_args.extend(extra_tpx_args);
 
+    // Default label filters from buckconfig, e.g.
+    //   [test]
+    //     default_exclude_labels = slow, flaky
+    //     default_include_labels =
+    // extend whatever was passed on the CLI via `--exclude` / `--include`, but
+    // only apply to tests discovered by expanding a wildcard pattern
+    // (`//foo/...`, `//foo:`) or another target's `tests` attribute. Tests named
+    // directly on the command line (`buck2 test //foo:my_slow_test`) bypass the
+    // defaults: asking for a test by name should always run it. For wildcard
+    // runs, `buck2 test //... --include slow` cancels a default exclusion of
+    // `slow` (running the full set of tests, slow ones included) rather than
+    // restricting the run to slow tests, and `--no-default-test-filters`
+    // disables the defaults entirely. See `TestLabelFiltering::new` for the
+    // exact rules.
+    let (default_included_labels, default_excluded_labels) = if request.ignore_default_test_filters
+    {
+        (Vec::new(), Vec::new())
+    } else {
+        (
+            read_default_test_labels(
+                &mut ctx,
+                cell_resolver.root_cell(),
+                "default_include_labels",
+            )
+            .await?,
+            read_default_test_labels(
+                &mut ctx,
+                cell_resolver.root_cell(),
+                "default_exclude_labels",
+            )
+            .await?,
+        )
+    };
+    let explicit_tests: StdBuckHashSet<TargetLabel> = parsed_patterns_with_modifiers
+        .iter()
+        .filter_map(|p| match &p.parsed_pattern {
+            ParsedPattern::Target(package, target_name, _extra) => {
+                Some(TargetLabel::new(package.dupe(), target_name.as_ref()))
+            }
+            ParsedPattern::Package(..) | ParsedPattern::Recursive(..) => None,
+        })
+        .collect();
+
     let test_outcome = test_targets(
         ctx.dupe(),
         resolved_pattern,
@@ -478,8 +523,11 @@ async fn test(
         Arc::new(TestLabelFiltering::new(
             request.included_labels.clone(),
             request.excluded_labels.clone(),
+            default_included_labels,
+            default_excluded_labels,
             request.always_exclude,
             request.build_filtered_targets,
+            explicit_tests,
         )),
         &*launcher,
         session,
@@ -1445,7 +1493,7 @@ async fn build_target_result(
     // 3. --build-run-info is requested and the target produces a RunInfo
     if let Some(test_info) = <dyn TestProvider>::from_collection(collections) {
         let skip_build_based_on_labels = !label_filtering.build_filtered_targets
-            && label_filtering.is_excluded(test_info.labels());
+            && label_filtering.is_excluded(label.target().unconfigured(), test_info.labels());
         if skip_build_based_on_labels {
             return Ok((BuildTargetResult::new(), providers));
         }
@@ -1518,7 +1566,7 @@ async fn test_target<'a, 'e>(
             .should_use(framework_type)
         {
             let test_info: &dyn TestProvider = internal_provider.as_ref();
-            if label_filtering.is_excluded(test_info.labels()) {
+            if label_filtering.is_excluded(target.target().unconfigured(), test_info.labels()) {
                 return Ok(None);
             }
 
@@ -1584,7 +1632,7 @@ async fn test_target<'a, 'e>(
 
     let fut = match <dyn TestProvider>::from_collection(collection) {
         Some(test_info) => {
-            if label_filtering.is_excluded(test_info.labels()) {
+            if label_filtering.is_excluded(target.target().unconfigured(), test_info.labels()) {
                 return Ok(None);
             }
             run_tests(
@@ -1693,17 +1741,82 @@ struct TestLabelFiltering {
     included_labels: BuckIndexSet<String>,
     /// Additional excluded labels. These have order of precedence after `included_labels`.
     excluded_labels: BuckIndexSet<String>,
+    /// Default include filters from buckconfig (`[test] default_include_labels`). Evaluated
+    /// after the CLI `included_labels`, and skipped entirely for tests in `explicit_tests`.
+    default_included_labels: BuckIndexSet<String>,
+    /// Default exclude filters from buckconfig (`[test] default_exclude_labels`). Evaluated
+    /// after the CLI `excluded_labels`, and skipped entirely for tests in `explicit_tests`.
+    default_excluded_labels: BuckIndexSet<String>,
     /// If true, ignores order of precedence such that as long as an exclusion filter matches, we
     /// don't match the set of labels.
     always_exclude: bool,
     /// Whether to build targets that are filtered out, but don't run it.
     build_filtered_targets: bool,
+    /// Tests named directly on the command line, as opposed to discovered by expanding a
+    /// wildcard pattern or another target's `tests` attribute. Only the CLI filters apply to
+    /// these, not the buckconfig defaults.
+    explicit_tests: StdBuckHashSet<TargetLabel>,
+}
+
+/// Read a comma-separated list of default test labels from the `[test]` section of
+/// buckconfig (e.g. `default_exclude_labels = slow, flaky`). Whitespace around each
+/// entry is trimmed and empty entries are dropped. Returns an empty `Vec` if unset.
+async fn read_default_test_labels(
+    ctx: &mut DiceComputations<'_>,
+    cell: CellName,
+    property: &'static str,
+) -> buck2_error::Result<Vec<String>> {
+    Ok(ctx
+        .get_legacy_config_property(
+            cell,
+            BuckconfigKeyRef {
+                section: "test",
+                property,
+            },
+        )
+        .await?
+        .map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 impl TestLabelFiltering {
-    fn is_excluded(&self, labels: Vec<&str>) -> bool {
-        let mut matched = self.included_labels.is_empty();
-        for include_label in &self.included_labels {
+    /// Whether the test `target` carrying `labels` should be filtered out. `target` is the
+    /// test's own unconfigured label: tests named directly on the command line only have the
+    /// CLI `--include` / `--exclude` filters applied to them, while tests discovered via
+    /// wildcard patterns or `tests` attributes are additionally subject to the buckconfig
+    /// default filters.
+    fn is_excluded(&self, target: &TargetLabel, labels: Vec<&str>) -> bool {
+        if self.explicit_tests.contains(target) {
+            self.is_excluded_by(&labels, &self.included_labels, &self.excluded_labels)
+        } else {
+            self.is_excluded_by(
+                &labels,
+                self.included_labels
+                    .iter()
+                    .chain(&self.default_included_labels),
+                self.excluded_labels
+                    .iter()
+                    .chain(&self.default_excluded_labels),
+            )
+        }
+    }
+
+    fn is_excluded_by<'a>(
+        &self,
+        labels: &[&str],
+        included_labels: impl IntoIterator<Item = &'a String>,
+        excluded_labels: impl IntoIterator<Item = &'a String>,
+    ) -> bool {
+        let mut any_includes = false;
+        let mut matched = false;
+        for include_label in included_labels {
+            any_includes = true;
             if let Some(include) = include_label.strip_prefix('!') {
                 // exclusion filters
                 if labels.contains(&include) {
@@ -1720,7 +1833,9 @@ impl TestLabelFiltering {
                 }
             }
         }
-        for exclude_label in &self.excluded_labels {
+        // With no inclusion filters at all, everything matches by default.
+        let matched = matched || !any_includes;
+        for exclude_label in excluded_labels {
             if labels.contains(&exclude_label.as_str()) {
                 return true;
             }
@@ -1732,14 +1847,66 @@ impl TestLabelFiltering {
     fn new(
         included_labels: Vec<String>,
         excluded_labels: Vec<String>,
+        default_included_labels: Vec<String>,
+        default_excluded_labels: Vec<String>,
         always_exclude: bool,
         build_filtered_targets: bool,
+        explicit_tests: StdBuckHashSet<TargetLabel>,
     ) -> Self {
+        let included_labels: BuckIndexSet<String> = included_labels.into_iter().collect();
+        let excluded_labels: BuckIndexSet<String> = excluded_labels.into_iter().collect();
+        let mut default_included_labels: BuckIndexSet<String> =
+            default_included_labels.into_iter().collect();
+        let mut default_excluded_labels: BuckIndexSet<String> =
+            default_excluded_labels.into_iter().collect();
+
+        // The CLI filters override the buckconfig defaults for the labels they
+        // mention rather than combining with them:
+        //
+        //  * `--include slow` when `slow` is in `default_exclude_labels` cancels
+        //    the default exclusion — it reads as "yes, run the slow tests too".
+        //    If every include entry is such a cancellation, no positive
+        //    selection remains and the whole test set runs. Mixed with other
+        //    entries (`--include slow --include unit`) the include list keeps
+        //    its usual positive-selector meaning ("run *only* matching tests"),
+        //    with the cancelled label selectable again: tests labeled `slow` or
+        //    `unit` run. To select *only* a default-excluded label, add
+        //    `--no-default-test-filters`.
+        //  * `--exclude fast` (or `--include '!fast'`) when `fast` is in
+        //    `default_include_labels` drops `fast` from the default selectors,
+        //    so the run isn't reduced to nothing by excluding every test the
+        //    defaults would have selected.
+        let mut all_includes_cancel_default_excludes = true;
+        for label in &included_labels {
+            match label.strip_prefix('!') {
+                Some(excluded) => {
+                    default_included_labels.shift_remove(excluded);
+                    all_includes_cancel_default_excludes = false;
+                }
+                None => {
+                    if !default_excluded_labels.shift_remove(label.as_str()) {
+                        all_includes_cancel_default_excludes = false;
+                    }
+                }
+            }
+        }
+        let included_labels = if all_includes_cancel_default_excludes {
+            BuckIndexSet::default()
+        } else {
+            included_labels
+        };
+        for label in &excluded_labels {
+            default_included_labels.shift_remove(label.as_str());
+        }
+
         Self {
-            included_labels: included_labels.into_iter().collect(),
-            excluded_labels: excluded_labels.into_iter().collect(),
+            included_labels,
+            excluded_labels,
+            default_included_labels,
+            default_excluded_labels,
             always_exclude,
             build_filtered_targets,
+            explicit_tests,
         }
     }
 }
@@ -1903,78 +2070,265 @@ fn ai_agent_tpx_args(agent_context: &[buck2_data::AgentContextEntry]) -> Vec<Str
 mod tests {
     use buck2_cli_proto::RepresentativeConfigFlag;
     use buck2_cli_proto::representative_config_flag;
+    use buck2_core::target::label::label::TargetLabel;
     use buck2_data::AgentContextEntry;
+    use dupe::Dupe;
 
     use crate::command::InternalRunnerConfig;
     use crate::command::TestLabelFiltering;
     use crate::command::ai_agent_tpx_args;
     use crate::command::generate_config_entry_args;
 
+    /// A filter with only CLI `--include` / `--exclude` labels set.
+    fn cli_filter(
+        included_labels: Vec<String>,
+        excluded_labels: Vec<String>,
+        always_exclude: bool,
+    ) -> TestLabelFiltering {
+        TestLabelFiltering::new(
+            included_labels,
+            excluded_labels,
+            vec![],
+            vec![],
+            always_exclude,
+            false,
+            Default::default(),
+        )
+    }
+
+    /// Any test not named directly on the command line.
+    fn wildcard_test() -> TargetLabel {
+        TargetLabel::testing_parse("root//tests:from_wildcard")
+    }
+
     #[test]
     fn only_include_labels_in_includes() {
-        let filter = TestLabelFiltering::new(
+        let filter = cli_filter(
             vec!["include_me".to_owned(), "!not_me".to_owned()],
             vec!["this_doesnt_affect_anything".to_owned()],
             false,
-            false,
         );
 
-        assert!(!filter.is_excluded(vec!["include_me"]));
-        assert!(filter.is_excluded(vec!["not_me"]));
-        assert!(filter.is_excluded(vec!["blah"]));
+        assert!(!filter.is_excluded(&wildcard_test(), vec!["include_me"]));
+        assert!(filter.is_excluded(&wildcard_test(), vec!["not_me"]));
+        assert!(filter.is_excluded(&wildcard_test(), vec!["blah"]));
     }
 
     #[test]
     fn order_of_precedence() {
-        let conflicting_filter = TestLabelFiltering::new(
+        let conflicting_filter = cli_filter(
             vec!["!not_me1".to_owned(), "not_me1".to_owned()],
             vec!["not_me2".to_owned()],
             false,
-            false,
         );
 
-        assert!(conflicting_filter.is_excluded(vec!["not_me1"]));
+        assert!(conflicting_filter.is_excluded(&wildcard_test(), vec!["not_me1"]));
 
-        let conflicting_filter = TestLabelFiltering::new(
+        let conflicting_filter = cli_filter(
             vec!["include_me".to_owned(), "!include_me".to_owned()],
             vec!["include_me".to_owned()],
             false,
-            false,
         );
 
-        assert!(!conflicting_filter.is_excluded(vec!["include_me"]));
+        assert!(!conflicting_filter.is_excluded(&wildcard_test(), vec!["include_me"]));
 
-        let conflicting_filter = TestLabelFiltering::new(
+        let conflicting_filter = cli_filter(
             vec!["include_me".to_owned()],
             vec!["!include_me".to_owned()],
             false,
-            false,
         );
 
-        assert!(!conflicting_filter.is_excluded(vec!["include_me"]));
+        assert!(!conflicting_filter.is_excluded(&wildcard_test(), vec!["include_me"]));
     }
 
     #[test]
     fn always_excludes_overrides_precedence() {
-        let filter = TestLabelFiltering::new(
+        let filter = cli_filter(
             vec!["include_me".to_owned(), "!not_me1".to_owned()],
             vec!["not_me2".to_owned()],
             true,
-            false,
         );
 
-        assert!(!filter.is_excluded(vec!["include_me", "blah"]));
-        assert!(filter.is_excluded(vec!["include_me", "not_me1"]));
-        assert!(filter.is_excluded(vec!["include_me", "not_me2"]));
+        assert!(!filter.is_excluded(&wildcard_test(), vec!["include_me", "blah"]));
+        assert!(filter.is_excluded(&wildcard_test(), vec!["include_me", "not_me1"]));
+        assert!(filter.is_excluded(&wildcard_test(), vec!["include_me", "not_me2"]));
 
-        let conflicting_filter = TestLabelFiltering::new(
+        let conflicting_filter = cli_filter(
             vec!["include_me".to_owned(), "!include_me".to_owned()],
             vec!["include_me".to_owned()],
             true,
-            false,
         );
 
-        assert!(conflicting_filter.is_excluded(vec!["include_me"]));
+        assert!(conflicting_filter.is_excluded(&wildcard_test(), vec!["include_me"]));
+    }
+
+    #[test]
+    fn default_exclude_labels_skip_by_default_but_include_overrides() {
+        // Models `[test] default_exclude_labels = slow` with no CLI `--include`:
+        // slow targets are skipped, everything else runs.
+        let default_skip = TestLabelFiltering::new(
+            vec![],
+            vec![],
+            vec![],
+            vec!["slow".to_owned()],
+            false,
+            false,
+            Default::default(),
+        );
+        assert!(default_skip.is_excluded(&wildcard_test(), vec!["slow"]));
+        assert!(default_skip.is_excluded(&wildcard_test(), vec!["slow", "integration"]));
+        assert!(!default_skip.is_excluded(&wildcard_test(), vec!["fast"]));
+        assert!(!default_skip.is_excluded(&wildcard_test(), vec![]));
+
+        // Models the same default combined with an explicit `--include slow`:
+        // the include cancels the default exclusion rather than restricting the
+        // run, so everything runs, slow tests included.
+        let include_overrides = TestLabelFiltering::new(
+            vec!["slow".to_owned()],
+            vec![],
+            vec![],
+            vec!["slow".to_owned()],
+            false,
+            false,
+            Default::default(),
+        );
+        assert!(!include_overrides.is_excluded(&wildcard_test(), vec!["slow"]));
+        assert!(!include_overrides.is_excluded(&wildcard_test(), vec!["fast"]));
+        assert!(!include_overrides.is_excluded(&wildcard_test(), vec![]));
+    }
+
+    #[test]
+    fn cli_include_cancels_default_exclude_selectively() {
+        // `[test] default_exclude_labels = slow, flaky` with `--include slow`:
+        // the `slow` exclusion is cancelled and `--include` does not restrict
+        // the run, but `flaky` stays excluded.
+        let filter = TestLabelFiltering::new(
+            vec!["slow".to_owned()],
+            vec![],
+            vec![],
+            vec!["slow".to_owned(), "flaky".to_owned()],
+            false,
+            false,
+            Default::default(),
+        );
+        assert!(!filter.is_excluded(&wildcard_test(), vec!["slow"]));
+        assert!(!filter.is_excluded(&wildcard_test(), vec!["fast"]));
+        assert!(filter.is_excluded(&wildcard_test(), vec!["flaky"]));
+        assert!(filter.is_excluded(&wildcard_test(), vec!["slow", "flaky"]));
+
+        // `--include foo` for a label that is not excluded by default keeps its
+        // positive-selector meaning: only `foo` tests run. The `slow` default
+        // exclusion stays, but include filters take precedence over it.
+        let filter = TestLabelFiltering::new(
+            vec!["foo".to_owned()],
+            vec![],
+            vec![],
+            vec!["slow".to_owned()],
+            false,
+            false,
+            Default::default(),
+        );
+        assert!(!filter.is_excluded(&wildcard_test(), vec!["foo"]));
+        assert!(!filter.is_excluded(&wildcard_test(), vec!["foo", "slow"]));
+        assert!(filter.is_excluded(&wildcard_test(), vec!["slow"]));
+        assert!(filter.is_excluded(&wildcard_test(), vec!["bar"]));
+
+        // A cancellation mixed with another selector (`--include slow --include
+        // unit`): the include list keeps its selector meaning and the cancelled
+        // label is selectable again, so tests matching either label run.
+        let filter = TestLabelFiltering::new(
+            vec!["slow".to_owned(), "unit".to_owned()],
+            vec![],
+            vec![],
+            vec!["slow".to_owned()],
+            false,
+            false,
+            Default::default(),
+        );
+        assert!(!filter.is_excluded(&wildcard_test(), vec!["slow"]));
+        assert!(!filter.is_excluded(&wildcard_test(), vec!["unit"]));
+        assert!(!filter.is_excluded(&wildcard_test(), vec!["unit", "slow"]));
+        assert!(filter.is_excluded(&wildcard_test(), vec!["fast"]));
+
+        // When every include entry cancels a default exclusion, no selection
+        // remains at all: the whole test set runs.
+        let filter = TestLabelFiltering::new(
+            vec!["slow".to_owned(), "flaky".to_owned()],
+            vec![],
+            vec![],
+            vec!["slow".to_owned(), "flaky".to_owned()],
+            false,
+            false,
+            Default::default(),
+        );
+        assert!(!filter.is_excluded(&wildcard_test(), vec!["slow"]));
+        assert!(!filter.is_excluded(&wildcard_test(), vec!["flaky"]));
+        assert!(!filter.is_excluded(&wildcard_test(), vec!["fast"]));
+    }
+
+    #[test]
+    fn cli_exclude_cancels_default_include() {
+        // `[test] default_include_labels = fast` normally restricts wildcard
+        // runs to fast tests; `--exclude fast` cancels that selector rather
+        // than reducing the run to nothing, so the non-fast tests run.
+        let filter = TestLabelFiltering::new(
+            vec![],
+            vec!["fast".to_owned()],
+            vec!["fast".to_owned()],
+            vec![],
+            false,
+            false,
+            Default::default(),
+        );
+        assert!(filter.is_excluded(&wildcard_test(), vec!["fast"]));
+        assert!(!filter.is_excluded(&wildcard_test(), vec!["unit"]));
+    }
+
+    #[test]
+    fn default_filters_bypassed_for_directly_named_tests() {
+        let named = TargetLabel::testing_parse("root//tests:named_slow");
+
+        // Models `buck2 test //tests:named_slow //tests/...` with
+        // `[test] default_exclude_labels = slow`: the test named on the command
+        // line runs even though it is labeled `slow`, while other slow tests
+        // discovered via the wildcard are still skipped.
+        let filter = TestLabelFiltering::new(
+            vec![],
+            vec![],
+            vec![],
+            vec!["slow".to_owned()],
+            false,
+            false,
+            [named.dupe()].into_iter().collect(),
+        );
+        assert!(!filter.is_excluded(&named, vec!["slow"]));
+        assert!(filter.is_excluded(&wildcard_test(), vec!["slow"]));
+
+        // `[test] default_include_labels` is also bypassed for directly named
+        // tests: they run whether or not they carry the label.
+        let include_defaults = TestLabelFiltering::new(
+            vec![],
+            vec![],
+            vec!["fast".to_owned()],
+            vec![],
+            false,
+            false,
+            [named.dupe()].into_iter().collect(),
+        );
+        assert!(!include_defaults.is_excluded(&named, vec!["slow"]));
+        assert!(include_defaults.is_excluded(&wildcard_test(), vec!["slow"]));
+
+        // CLI `--exclude` still applies to directly named tests.
+        let cli_exclude = TestLabelFiltering::new(
+            vec![],
+            vec!["slow".to_owned()],
+            vec![],
+            vec![],
+            false,
+            false,
+            [named.dupe()].into_iter().collect(),
+        );
+        assert!(cli_exclude.is_excluded(&named, vec!["slow"]));
     }
 
     #[test]
