@@ -574,6 +574,11 @@ message TestRequest {
   // should be built instead of only test providers. When unset, this defaults
   // to `[buck2] test_builds_targets`.
   optional bool build_run_info = 16;
+
+  // Whether to ignore the `[test] default_exclude_labels` /
+  // `default_include_labels` buckconfig defaults. When true, only the label
+  // filters supplied on the CLI (`--exclude` / `--include`) are applied.
+  bool ignore_default_test_filters = 17;
 }
 
 message BxlRequest {
