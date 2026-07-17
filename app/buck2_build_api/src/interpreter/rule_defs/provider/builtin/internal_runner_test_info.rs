@@ -137,7 +137,7 @@ pub struct InternalRunnerTestInfo<'v> {
     /// command related to test execution, including listing.
     worker: ValueOfUnchecked<'v, FrozenWorkerInfo>,
 
-    /// Whether test execution results can be read from the remote action cache.
+    /// Whether test execution results are eligible for remote action cache reads and uploads.
     supports_test_execution_caching: ValueOfUnchecked<'v, bool>,
 
     /// A Starlark callable that parses test listing output into structured test
