@@ -690,13 +690,21 @@ impl DiceCommandUpdater<'_, '_> {
             .or_else(|| parse_concurrency(config_threads))
             .unwrap_or_else(buck2_util::threads::available_parallelism_fresh);
 
-        if let Some(max_lines) = root_config.parse(BuckconfigKeyRef {
+        let max_lines = root_config.parse::<u64>(BuckconfigKeyRef {
             section: "ui",
             property: "thread_line_limit",
-        })? {
+        })?;
+        let slim_test_output = root_config.parse::<bool>(BuckconfigKeyRef {
+            section: "ui",
+            property: "slim_test_output",
+        })?;
+        if max_lines.is_some() || slim_test_output.is_some() {
             self.cmd_ctx
                 .events()
-                .instant_event(buck2_data::ConsolePreferences { max_lines });
+                .instant_event(buck2_data::ConsolePreferences {
+                    max_lines,
+                    slim_test_output,
+                });
         }
 
         let enable_miniperf = root_config
