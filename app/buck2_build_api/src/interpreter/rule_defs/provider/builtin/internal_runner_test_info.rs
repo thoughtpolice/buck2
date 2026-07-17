@@ -138,6 +138,7 @@ pub struct InternalRunnerTestInfo<'v> {
     worker: ValueOfUnchecked<'v, FrozenWorkerInfo>,
 
     /// Whether test execution results are eligible for remote action cache reads and uploads.
+    /// Local uploads also require `buck2.default_allow_test_cache_upload`.
     supports_test_execution_caching: ValueOfUnchecked<'v, bool>,
 
     /// A Starlark callable that parses test listing output into structured test
