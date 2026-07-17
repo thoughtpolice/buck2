@@ -1425,12 +1425,16 @@ mod tests {
     #[test]
     fn oneline_summary_has_prefix_and_name() {
         let result = test_result(TestStatus::PASS, "");
-        let line =
-            test_result_oneline(result.status, &result.name, test_result_duration(&result)).unwrap();
+        let line = test_result_oneline(result.status, &result.name, test_result_duration(&result))
+            .unwrap();
         let rendered = line.fmt_for_test().to_string();
         assert!(rendered.contains("Pass"), "unexpected render: {rendered}");
-        assert!(rendered.contains("example_test"), "unexpected render: {rendered}");
+        assert!(
+            rendered.contains("example_test"),
+            "unexpected render: {rendered}"
+        );
     }
+
     fn action_execution_event(identifier: &str) -> BuckEvent {
         BuckEvent::new(
             UNIX_EPOCH,
