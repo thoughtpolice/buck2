@@ -10,12 +10,8 @@
 
 use std::iter;
 
-use buck2_event_observer::humanized::HumanizedBytes;
-use buck2_event_observer::humanized::HumanizedBytesPerSecond;
-use buck2_event_observer::re_state::NetworkStats;
 use buck2_event_observer::re_state::ReState;
 use buck2_event_observer::session_info::SessionInfo;
-use buck2_event_observer::two_snapshots::TwoSnapshots;
 use superconsole::Component;
 use superconsole::Dimensions;
 use superconsole::DrawMode;
@@ -27,7 +23,6 @@ use superconsole::Span;
 pub struct SessionInfoComponent<'s> {
     pub session_info: &'s SessionInfo,
     pub re_state: &'s ReState,
-    pub two_snapshots: &'s TwoSnapshots,
 }
 
 impl Component for SessionInfoComponent<'_> {
@@ -36,7 +31,7 @@ impl Component for SessionInfoComponent<'_> {
     fn draw_unchecked(
         &self,
         dimensions: Dimensions,
-        mode: DrawMode,
+        _mode: DrawMode,
     ) -> buck2_error::Result<Lines> {
         let mut headers = Lines::new();
         let mut ids = vec![];
@@ -57,47 +52,6 @@ impl Component for SessionInfoComponent<'_> {
         if let Some(session_id) = &self.re_state.session_id {
             headers.push(Line::unstyled("RE session:")?);
             ids.push(Span::new_unstyled(session_id)?);
-        }
-        if let Some(NetworkStats {
-            re_upload_bytes,
-            re_upload_bytes_per_second,
-            download_bytes,
-            download_bytes_per_second,
-        }) = self.re_state.network_stats(self.two_snapshots)
-        {
-            match mode {
-                DrawMode::Normal => {
-                    let rate = |bytes_per_second: u64| {
-                        if bytes_per_second == 0 {
-                            " ".repeat(HumanizedBytesPerSecond::FIXED_WIDTH_WIDTH)
-                        } else {
-                            HumanizedBytesPerSecond::fixed_width(bytes_per_second).to_string()
-                        }
-                    };
-                    headers.push(Line::unstyled("Network:")?);
-                    ids.push(Span::new_unstyled(format!(
-                        "{:<4} {} {}",
-                        "up",
-                        HumanizedBytes::fixed_width(re_upload_bytes),
-                        rate(re_upload_bytes_per_second),
-                    ))?);
-                    headers.push(Line::default());
-                    ids.push(Span::new_unstyled(format!(
-                        "{:<4} {} {}",
-                        "down",
-                        HumanizedBytes::fixed_width(download_bytes),
-                        rate(download_bytes_per_second),
-                    ))?);
-                }
-                DrawMode::Final => {
-                    headers.push(Line::unstyled("Network:")?);
-                    ids.push(Span::new_unstyled(format!(
-                        "up {}  down {}",
-                        HumanizedBytes::new(re_upload_bytes),
-                        HumanizedBytes::new(download_bytes),
-                    ))?);
-                }
-            }
         }
         if self.session_info.legacy_dice {
             headers.push(Line::unstyled("Note:")?);
