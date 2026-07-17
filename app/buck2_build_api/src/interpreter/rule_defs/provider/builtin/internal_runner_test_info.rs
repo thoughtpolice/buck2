@@ -139,7 +139,7 @@ pub struct InternalRunnerTestInfoGen<V: ValueLifetimeless> {
     /// command related to test execution, including listing.
     worker: ValueOfUncheckedGeneric<V, FrozenWorkerInfo>,
 
-    /// Whether test execution results can be read from the remote action cache.
+    /// Whether test execution results are eligible for remote action cache reads and uploads.
     supports_test_execution_caching: ValueOfUncheckedGeneric<V, bool>,
 
     /// A Starlark callable that parses test listing output into structured test
