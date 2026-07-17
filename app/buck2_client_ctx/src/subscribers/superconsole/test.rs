@@ -129,24 +129,30 @@ impl TestCounterComponent {
 
         // TODO(brasselsprouts): use the outer try_into conversion on Lines.
 
+        // Status columns are kept in the same order as the final
+        // "Tests finished:" summary printed by the test command.
         let mut spans = Vec::new();
         if test_state.listing_failed > 0 {
             spans.push(TestCounterColumn::LISTING_FAIL.to_span_from_test_state(test_state)?);
             spans.push(". ".try_into()?);
         }
-        spans.push(TestCounterColumn::DISCOVERED.to_span_from_test_state(test_state)?);
-        spans.push(". ".try_into()?);
+        // Not every runner reports discovery (the OSS external runner does
+        // not), so only show the column once something was discovered.
+        if test_state.discovered > 0 {
+            spans.push(TestCounterColumn::DISCOVERED.to_span_from_test_state(test_state)?);
+            spans.push(". ".try_into()?);
+        }
         spans.push(TestCounterColumn::PASS.to_span_from_test_state(test_state)?);
         spans.push(". ".try_into()?);
         spans.push(TestCounterColumn::FAIL.to_span_from_test_state(test_state)?);
+        spans.push(". ".try_into()?);
+        spans.push(TestCounterColumn::TIMEOUT.to_span_from_test_state(test_state)?);
         spans.push(". ".try_into()?);
         spans.push(TestCounterColumn::FATAL.to_span_from_test_state(test_state)?);
         spans.push(". ".try_into()?);
         spans.push(TestCounterColumn::SKIP.to_span_from_test_state(test_state)?);
         spans.push(". ".try_into()?);
         spans.push(TestCounterColumn::OMIT.to_span_from_test_state(test_state)?);
-        spans.push(". ".try_into()?);
-        spans.push(TestCounterColumn::TIMEOUT.to_span_from_test_state(test_state)?);
         spans.push(". ".try_into()?);
         spans.push(TestCounterColumn::INFRA_FAILURE.to_span_from_test_state(test_state)?);
         Ok(Lines::from_iter([Line::from_iter(spans)]))
@@ -167,7 +173,10 @@ impl Component for TestHeader<'_> {
         dimensions: superconsole::Dimensions,
         mode: superconsole::DrawMode,
     ) -> buck2_error::Result<superconsole::Lines> {
-        if self.session_info.test_session.is_some() {
+        // TPX announces a test session up front, but the internal runner and
+        // the OSS external runner never report one, so also show the counters
+        // once any test activity has been observed.
+        if self.session_info.test_session.is_some() || self.test_state.has_activity() {
             TestCounterComponent.draw_unchecked(self.test_state, dimensions, mode)
         } else {
             Ok(Lines::new())
@@ -201,5 +210,119 @@ impl StylizedCount {
         style
             .apply(format!("{} {}", self.label, self.count))
             .try_into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use buck2_wrapper_common::invocation_id::TraceId;
+
+    use super::*;
+
+    fn session_info(test_session: Option<buck2_data::TestSessionInfo>) -> SessionInfo {
+        SessionInfo {
+            trace_id: TraceId::null(),
+            test_session,
+            legacy_dice: false,
+        }
+    }
+
+    fn test_session() -> Option<buck2_data::TestSessionInfo> {
+        Some(buck2_data::TestSessionInfo {
+            info: "test session".to_owned(),
+            test_session_id: None,
+        })
+    }
+
+    fn draw(
+        session_info: &SessionInfo,
+        test_state: &TestState,
+        mode: DrawMode,
+    ) -> buck2_error::Result<String> {
+        let lines = TestHeader {
+            session_info,
+            test_state,
+        }
+        .draw_unchecked(
+            Dimensions {
+                width: 120,
+                height: 1,
+            },
+            mode,
+        )?;
+        Ok(lines.fmt_for_test().to_string())
+    }
+
+    #[test]
+    fn test_hidden_without_session_or_activity() -> buck2_error::Result<()> {
+        let output = draw(&session_info(None), &TestState::default(), DrawMode::Normal)?;
+        assert_eq!(output, "");
+        Ok(())
+    }
+
+    #[test]
+    fn test_shown_on_activity_without_session() -> buck2_error::Result<()> {
+        let state = TestState {
+            pass: 1,
+            ..TestState::default()
+        };
+        let output = draw(&session_info(None), &state, DrawMode::Normal)?;
+        pretty_assertions::assert_eq!(
+            output,
+            "<span fg=green>Pass 1</span>. Fail 0. Timeout 0. Fatal 0. \
+             Skip 0. Omit 0. Infra Failure 0\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_shown_with_session_and_zero_counts() -> buck2_error::Result<()> {
+        let output = draw(
+            &session_info(test_session()),
+            &TestState::default(),
+            DrawMode::Normal,
+        )?;
+        pretty_assertions::assert_eq!(
+            output,
+            "Pass 0. Fail 0. Timeout 0. Fatal 0. Skip 0. Omit 0. Infra Failure 0\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_column_order_matches_final_summary() -> buck2_error::Result<()> {
+        let state = TestState {
+            discovered: 1,
+            pass: 2,
+            fail: 3,
+            timeout: 4,
+            fatal: 5,
+            skipped: 6,
+            omitted: 7,
+            infra_failure: 8,
+            listing_failed: 9,
+            ..TestState::default()
+        };
+        let output = draw(&session_info(None), &state, DrawMode::Normal)?;
+        pretty_assertions::assert_eq!(
+            output,
+            "<span fg=red>Listing Fail 9</span>. Discovered 1. \
+             <span fg=green>Pass 2</span>. <span fg=red>Fail 3</span>. \
+             <span fg=yellow>Timeout 4</span>. <span fg=red>Fatal 5</span>. \
+             <span fg=yellow>Skip 6</span>. <span fg=magenta>Omit 7</span>. \
+             <span fg=magenta>Infra Failure 8</span>\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_final_mode_renders_nothing() -> buck2_error::Result<()> {
+        let state = TestState {
+            pass: 1,
+            ..TestState::default()
+        };
+        let output = draw(&session_info(test_session()), &state, DrawMode::Final)?;
+        assert_eq!(output, "");
+        Ok(())
     }
 }
