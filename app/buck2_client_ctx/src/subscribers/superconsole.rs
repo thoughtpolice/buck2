@@ -1991,6 +1991,7 @@ mod tests {
                 re_upload_bytes: 10 * 1024 * 1024,
                 re_download_bytes: 1024 * 1024 * 1024,
                 http_download_bytes: 512 * 1024 * 1024,
+                io_in_flight_read: 1,
                 ..Default::default()
             },
         );
@@ -2013,11 +2014,14 @@ mod tests {
             )?
             .fmt_for_test()
             .to_string();
-        // The network stats share a line with the rest of the I/O stats.
+        // The network stats and in-flight I/O counters share a single line
+        // with the rest of the I/O stats.
         assert!(
             normal.contains("Network: ↑ 10MiB 1.0MiB/s ↓ 1.5GiB 154MiB/s  Max RSS"),
             "unexpected render:\n{normal}"
         );
+        assert!(normal.contains("Read = 1"), "unexpected render:\n{normal}");
+        assert_eq!(normal.lines().count(), 1, "unexpected render:\n{normal}");
 
         // Only the network totals survive into the final render; the
         // instantaneous stats and rates do not.
