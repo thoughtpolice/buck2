@@ -438,7 +438,7 @@ impl Default for SuperConsoleConfig {
             enable_dice: false,
             enable_debug_events: false,
             enable_detailed_re: false,
-            enable_io: false,
+            enable_io: true,
             enable_commands: false,
             expanded_progress: true,
             display_platform: false,
@@ -576,7 +576,6 @@ impl Component for BuckRootComponent<'_> {
             &SessionInfoComponent {
                 session_info: self.state.session_info(),
                 re_state: self.state.simple_console.observer.re_state(),
-                two_snapshots: self.state.simple_console.observer.two_snapshots(),
             },
             mode,
         )?;
@@ -591,6 +590,7 @@ impl Component for BuckRootComponent<'_> {
         draw.draw(
             &IoHeader {
                 super_console_config: &self.state.config,
+                re_state: self.state.simple_console.observer.re_state(),
                 two_snapshots: self.state.simple_console.observer.two_snapshots(),
             },
             mode,
@@ -1988,12 +1988,10 @@ mod tests {
         };
 
         let re_state = ReState::new();
-        let two_snapshots = TwoSnapshots::default();
 
         let full = SessionInfoComponent {
             session_info: &info,
             re_state: &re_state,
-            two_snapshots: &two_snapshots,
         }
         .draw_unchecked(
             Dimensions {
@@ -2010,7 +2008,6 @@ mod tests {
         let multiline = SessionInfoComponent {
             session_info: &info,
             re_state: &re_state,
-            two_snapshots: &two_snapshots,
         }
         .draw_unchecked(
             Dimensions {
@@ -2028,7 +2025,6 @@ mod tests {
         let too_small = SessionInfoComponent {
             session_info: &info,
             re_state: &re_state,
-            two_snapshots: &two_snapshots,
         }
         .draw_unchecked(
             Dimensions {
@@ -2044,13 +2040,7 @@ mod tests {
     }
 
     #[test]
-    fn test_session_info_network() -> buck2_error::Result<()> {
-        let info = SessionInfo {
-            trace_id: TraceId::null(),
-            test_session: None,
-            legacy_dice: false,
-        };
-
+    fn test_io_header_network() -> buck2_error::Result<()> {
         let mut re_state = ReState::new();
         re_state.add_re_session(&buck2_data::RemoteExecutionSessionCreated {
             session_id: "reSessionID-123".to_owned(),
@@ -2072,8 +2062,10 @@ mod tests {
             },
         );
 
-        let component = SessionInfoComponent {
-            session_info: &info,
+        // I/O output is on by default, and carries the network line.
+        let config = SuperConsoleConfig::default();
+        let component = IoHeader {
+            super_console_config: &config,
             re_state: &re_state,
             two_snapshots: &two_snapshots,
         };
@@ -2081,42 +2073,32 @@ mod tests {
         let normal = component
             .draw_unchecked(
                 Dimensions {
-                    width: 100,
+                    width: 120,
                     height: 10,
                 },
                 DrawMode::Normal,
             )?
             .fmt_for_test()
             .to_string();
-        let expected_network = if cfg!(fbcode_build) {
-            "Network: up    10MiB 1.0MiB/s\n         down 1.5GiB 154MiB/s"
-        } else {
-            "Network:  up    10MiB 1.0MiB/s\n          down 1.5GiB 154MiB/s"
-        };
+        // The network stats share a line with the rest of the I/O stats.
         assert!(
-            normal.contains(expected_network),
+            normal.contains("Network: ↑ 10MiB 1.0MiB/s ↓ 1.5GiB 154MiB/s"),
             "unexpected render:\n{normal}"
         );
 
+        // Only the network totals survive into the final render; the
+        // instantaneous stats and rates do not.
         let final_render = component
             .draw_unchecked(
                 Dimensions {
-                    width: 100,
+                    width: 120,
                     height: 10,
                 },
                 DrawMode::Final,
             )?
             .fmt_for_test()
             .to_string();
-        let expected_network = if cfg!(fbcode_build) {
-            "Network: up 10MiB  down 1.5GiB"
-        } else {
-            "Network:  up 10MiB  down 1.5GiB"
-        };
-        assert!(
-            final_render.contains(expected_network),
-            "unexpected render:\n{final_render}"
-        );
+        assert_eq!(final_render, "Network: ↑ 10MiB ↓ 1.5GiB\n");
 
         Ok(())
     }
