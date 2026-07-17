@@ -82,6 +82,7 @@ mod tests {
                 contacts = ["oncall+my_team@xmail.facebook.com"],
                 use_project_relative_paths = True,
                 run_from_project_root = False,
+                supports_test_execution_caching = True,
             )
         "#
         ))?;
@@ -496,6 +497,22 @@ mod tests {
             "#
             ),
             "`run_from_project_root`",
+        );
+
+        tester.run_starlark_bzl_test_expecting_error(
+            indoc!(
+                r#"
+            def test():
+                InternalRunnerTestInfo(
+                    type = "custom",
+                    parse_test_listing = lambda stdout: [],
+                    parse_test_result = lambda stdout, stderr, exit_code: [],
+                    listing_command = ["binary", "--list"],
+                    supports_test_execution_caching = "yes",
+                )
+            "#
+            ),
+            "`supports_test_execution_caching`",
         );
         Ok(())
     }
@@ -1252,5 +1269,34 @@ fn test_listing_command_accessor() -> buck2_error::Result<()> {
         })
         .collect();
     assert_eq!(exec_cmd, vec!["my_binary"]);
+    Ok(())
+}
+
+#[test]
+fn test_supports_test_execution_caching_accessor() -> buck2_error::Result<()> {
+    let default_info = freeze_provider(indoc!(
+        r#"
+        exported_info = InternalRunnerTestInfo(
+            type = "custom",
+            parse_test_listing = lambda stdout: [],
+            parse_test_result = lambda stdout, stderr, exit_code: [],
+            listing_command = ["binary", "--list"],
+        )
+        "#
+    ))?;
+    assert!(!default_info.as_ref().supports_test_execution_caching());
+
+    let cacheable_info = freeze_provider(indoc!(
+        r#"
+        exported_info = InternalRunnerTestInfo(
+            type = "custom",
+            parse_test_listing = lambda stdout: [],
+            parse_test_result = lambda stdout, stderr, exit_code: [],
+            listing_command = ["binary", "--list"],
+            supports_test_execution_caching = True,
+        )
+        "#
+    ))?;
+    assert!(cacheable_info.as_ref().supports_test_execution_caching());
     Ok(())
 }
