@@ -2166,6 +2166,7 @@ mod tests {
                 re_upload_bytes: 10 * 1024 * 1024,
                 re_download_bytes: 1024 * 1024 * 1024,
                 http_download_bytes: 512 * 1024 * 1024,
+                io_in_flight_read: 1,
                 ..Default::default()
             },
         );
@@ -2193,6 +2194,10 @@ mod tests {
             normal.contains("Network: ↑ 10MiB 1.0MiB/s ↓ 1.5GiB 154MiB/s"),
             "unexpected render:\n{normal}"
         );
+        // In-flight I/O counters flicker in and out between snapshots, so
+        // they are deliberately not rendered.
+        assert!(!normal.contains("Read = 1"), "unexpected render:\n{normal}");
+        assert_eq!(normal.lines().count(), 1, "unexpected render:\n{normal}");
 
         // Only the network totals survive into the final render; the
         // instantaneous stats and rates do not.
