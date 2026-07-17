@@ -10,6 +10,8 @@
 
 use buck2_core::io_counters::IoCounterKey;
 use buck2_event_observer::humanized::HumanizedBytes;
+use buck2_event_observer::re_state::NetworkStats;
+use buck2_event_observer::re_state::ReState;
 use buck2_event_observer::two_snapshots::TwoSnapshots;
 use gazebo::prelude::*;
 use superconsole::Component;
@@ -22,6 +24,7 @@ use crate::subscribers::superconsole::SuperConsoleConfig;
 
 pub(crate) struct IoHeader<'s> {
     pub(crate) super_console_config: &'s SuperConsoleConfig,
+    pub(crate) re_state: &'s ReState,
     pub(crate) two_snapshots: &'s TwoSnapshots,
 }
 
@@ -31,6 +34,7 @@ impl Component for IoHeader<'_> {
     fn draw_unchecked(&self, dimensions: Dimensions, mode: DrawMode) -> buck2_error::Result<Lines> {
         render(
             self.two_snapshots,
+            self.re_state,
             mode,
             dimensions.width,
             self.super_console_config.enable_io,
@@ -96,10 +100,17 @@ pub fn io_in_flight_non_zero_counters(
 fn do_render(
     two_snapshots: &TwoSnapshots,
     snapshot: &buck2_data::Snapshot,
+    network: Option<NetworkStats>,
     width: usize,
 ) -> buck2_error::Result<Lines> {
     let mut lines = Vec::new();
     let mut parts = Vec::new();
+    if let Some(stats) = network {
+        parts.push(format!(
+            "Network: {}",
+            stats.display_up_down(DrawMode::Normal)
+        ));
+    }
     if let Some(buck2_rss) = snapshot.buck2_rss {
         parts.push(format!("RSS = {}", HumanizedBytes::new(buck2_rss)));
     } else {
@@ -169,6 +180,7 @@ fn do_render(
 
 fn render(
     two_snapshots: &TwoSnapshots,
+    re_state: &ReState,
     draw_mode: DrawMode,
     width: usize,
     enabled: bool,
@@ -176,11 +188,27 @@ fn render(
     if !enabled {
         return Ok(Lines::new());
     }
+    // Total network traffic shares the I/O stats line rather than living in
+    // the session info block.
+    let network = re_state.network_stats(two_snapshots);
+    // The other stats are instantaneous and meaningless once the command is
+    // over; only the network totals survive into the final render.
     if let DrawMode::Final = draw_mode {
-        return Ok(Lines::new());
+        return Ok(Lines(
+            network
+                .map(|stats| {
+                    Line::unstyled(&format!(
+                        "Network: {}",
+                        stats.display_up_down(DrawMode::Final)
+                    ))
+                })
+                .transpose()?
+                .into_iter()
+                .collect(),
+        ));
     }
     if let Some((_, snapshot)) = &two_snapshots.last {
-        do_render(two_snapshots, snapshot, width)
+        do_render(two_snapshots, snapshot, network, width)
     } else {
         Ok(Lines::new())
     }
