@@ -13,7 +13,6 @@ use buck2_event_observer::humanized::HumanizedBytes;
 use buck2_event_observer::re_state::NetworkStats;
 use buck2_event_observer::re_state::ReState;
 use buck2_event_observer::two_snapshots::TwoSnapshots;
-use gazebo::prelude::*;
 use superconsole::Component;
 use superconsole::Dimensions;
 use superconsole::DrawMode;
@@ -31,39 +30,18 @@ pub(crate) struct IoHeader<'s> {
 impl Component for IoHeader<'_> {
     type Error = buck2_error::Error;
 
-    fn draw_unchecked(&self, dimensions: Dimensions, mode: DrawMode) -> buck2_error::Result<Lines> {
+    fn draw_unchecked(
+        &self,
+        _dimensions: Dimensions,
+        mode: DrawMode,
+    ) -> buck2_error::Result<Lines> {
         render(
             self.two_snapshots,
             self.re_state,
             mode,
-            dimensions.width,
             self.super_console_config.enable_io,
         )
     }
-}
-
-/// Place space-separated words on lines.
-fn words_to_lines(words: Vec<String>, width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut current_line = String::new();
-    for word in words {
-        if current_line.is_empty() {
-            current_line = word;
-            continue;
-        }
-        // This works correctly only for ASCII strings.
-        if current_line.len() + 1 + word.len() > width {
-            lines.push(current_line);
-            current_line = word;
-        } else {
-            current_line.push(' ');
-            current_line.push_str(&word);
-        }
-    }
-    if !current_line.is_empty() {
-        lines.push(current_line);
-    }
-    lines
 }
 
 pub fn io_in_flight_non_zero_counters(
@@ -101,7 +79,6 @@ fn do_render(
     two_snapshots: &TwoSnapshots,
     snapshot: &buck2_data::Snapshot,
     network: Option<NetworkStats>,
-    width: usize,
 ) -> buck2_error::Result<Lines> {
     let mut lines = Vec::new();
     let mut parts = Vec::new();
@@ -169,12 +146,6 @@ fn do_render(
         )?]));
     }
 
-    let mut counters = Vec::new();
-    for (key, value) in io_in_flight_non_zero_counters(snapshot) {
-        counters.push(format!("{key:?} = {value}"));
-    }
-    lines.extend(words_to_lines(counters, width).into_try_map(|s| Line::unstyled(&s))?);
-
     Ok(Lines(lines))
 }
 
@@ -182,7 +153,6 @@ fn render(
     two_snapshots: &TwoSnapshots,
     re_state: &ReState,
     draw_mode: DrawMode,
-    width: usize,
     enabled: bool,
 ) -> buck2_error::Result<Lines> {
     if !enabled {
@@ -208,34 +178,8 @@ fn render(
         ));
     }
     if let Some((_, snapshot)) = &two_snapshots.last {
-        do_render(two_snapshots, snapshot, network, width)
+        do_render(two_snapshots, snapshot, network)
     } else {
         Ok(Lines::new())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::words_to_lines;
-
-    #[test]
-    fn test_words_to_lines() {
-        assert_eq!(Vec::<String>::new(), words_to_lines(vec![], 5));
-        assert_eq!(
-            vec!["ab".to_owned()],
-            words_to_lines(vec!["ab".to_owned()], 5)
-        );
-        assert_eq!(
-            vec!["ab cd".to_owned()],
-            words_to_lines(vec!["ab".to_owned(), "cd".to_owned()], 5)
-        );
-        assert_eq!(
-            vec!["ab".to_owned(), "cd".to_owned()],
-            words_to_lines(vec!["ab".to_owned(), "cd".to_owned()], 4)
-        );
-        assert_eq!(
-            vec!["abcd".to_owned()],
-            words_to_lines(vec!["abcd".to_owned()], 3)
-        );
     }
 }
