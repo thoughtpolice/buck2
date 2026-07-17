@@ -13,6 +13,7 @@
 ## InternalRunnerTestInfo.parse\_test\_result
 ## InternalRunnerTestInfo.required\_local\_resources
 ## InternalRunnerTestInfo.run\_from\_project\_root
+## InternalRunnerTestInfo.supports\_test\_execution\_caching
 ## InternalRunnerTestInfo.test\_type
 ## InternalRunnerTestInfo.use\_project\_relative\_paths
 ## InternalRunnerTestInfo.worker
