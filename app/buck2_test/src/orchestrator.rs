@@ -206,7 +206,11 @@ impl OwnedTestInfo {
                 .value()
                 .as_ref()
                 .supports_test_execution_caching(),
-            Self::Internal(_) => false,
+            Self::Internal(info) => info
+                .as_ref()
+                .value()
+                .as_ref()
+                .supports_test_execution_caching(),
         }
     }
 
