@@ -790,28 +790,15 @@ enum ParseEventError {
 #[buck2(tag = Tier0)]
 pub struct InvalidBuckEvent(pub Arc<BuckEvent>);
 
-pub fn format_test_result(
-    test_result: &buck2_data::TestResult,
-    verbosity: Verbosity,
-) -> buck2_error::Result<Option<Lines>> {
-    let buck2_data::TestResult {
-        name,
-        status,
-        duration,
-        details,
-        ..
-    } = test_result;
-    let status = TestStatus::try_from(*status)?;
-
-    // Pass results normally have no details, unless the --print-passing-details is set.
-    // Do not display anything for passing tests unless verbosity is high or details are present
-    // to avoid cluttering the UI with unimportant test results.
-    if matches!(&status, TestStatus::PASS | TestStatus::LISTING_SUCCESS)
-        && details.is_empty()
-        && !verbosity.print_all_commands()
-    {
-        return Ok(None);
-    }
+/// The single styled summary line for a test result: status prefix, name, and
+/// (when reported) duration. Shared by the scrollback formatter and the
+/// finished-tests window so both stay in sync.
+pub fn test_result_oneline(
+    status: i32,
+    name: &str,
+    duration: Option<Duration>,
+) -> buck2_error::Result<Line> {
+    let status = TestStatus::try_from(status)?;
 
     let prefix = match status {
         TestStatus::FAIL => Span::new_styled("✗ Fail".to_owned().red()),
@@ -826,16 +813,49 @@ pub fn format_test_result(
         TestStatus::RERUN => Span::new_styled("↻ Rerun".to_owned().cyan()),
         TestStatus::LISTING_FAILED => Span::new_styled("⚠ Listing failed".to_owned().red()),
     }?;
-    let mut base = Line::from_iter([prefix, Span::new_unstyled(format!(": {name}",))?]);
+    let mut line = Line::from_iter([prefix, Span::new_unstyled(format!(": {name}",))?]);
 
     if let Some(duration) = duration {
-        if let Ok(duration) = Duration::try_from(*duration) {
-            base.push(Span::new_unstyled(format!(
-                " ({})",
-                fmt_duration::fmt_duration(duration)
-            ))?);
-        }
+        line.push(Span::new_unstyled(format!(
+            " ({})",
+            fmt_duration::fmt_duration(duration)
+        ))?);
     }
+    Ok(line)
+}
+
+/// The wall-clock duration of a finished test, if it was reported.
+pub fn test_result_duration(test_result: &buck2_data::TestResult) -> Option<Duration> {
+    test_result
+        .duration
+        .and_then(|duration| Duration::try_from(duration).ok())
+}
+
+pub fn format_test_result(
+    test_result: &buck2_data::TestResult,
+    verbosity: Verbosity,
+) -> buck2_error::Result<Option<Lines>> {
+    let buck2_data::TestResult {
+        name,
+        status,
+        details,
+        ..
+    } = test_result;
+
+    // Pass results normally have no details, unless the --print-passing-details is set.
+    // Do not display anything for passing tests unless verbosity is high or details are present
+    // to avoid cluttering the UI with unimportant test results.
+    if matches!(
+        TestStatus::try_from(*status)?,
+        TestStatus::PASS | TestStatus::LISTING_SUCCESS
+    ) && details.is_empty()
+        && !verbosity.print_all_commands()
+    {
+        return Ok(None);
+    }
+
+    let base = test_result_oneline(*status, name, test_result_duration(test_result))?;
+
     // If a test has details, we always show them. It's the test runner's
     // responsibility to withhold details when these are not relevant.
     // For instance, tpx will always withhold details of passing tests
@@ -845,6 +865,25 @@ pub fn format_test_result(
         lines.append(&mut Lines::from_multiline_string(details, Default::default()).0);
     }
     Ok(Some(Lines(lines)))
+}
+
+/// Whether this test result is a problem (failure-like) result. Consoles
+/// hiding non-problem results (`[ui] slim_test_output`) still print these;
+/// the rest only show up in the live counters.
+pub fn is_test_result_problem(test_result: &buck2_data::TestResult) -> buck2_error::Result<bool> {
+    Ok(match TestStatus::try_from(test_result.status)? {
+        TestStatus::PASS
+        | TestStatus::LISTING_SUCCESS
+        | TestStatus::SKIP
+        | TestStatus::OMITTED
+        | TestStatus::RERUN => false,
+        TestStatus::FAIL
+        | TestStatus::FATAL
+        | TestStatus::TIMEOUT
+        | TestStatus::INFRA_FAILURE
+        | TestStatus::LISTING_FAILED
+        | TestStatus::UNKNOWN => true,
+    })
 }
 
 pub struct ActionErrorDisplay<'a> {
@@ -1348,6 +1387,50 @@ mod tests {
 
     use super::*;
 
+    fn test_result(status: TestStatus, details: &str) -> buck2_data::TestResult {
+        buck2_data::TestResult {
+            name: "example_test".to_owned(),
+            status: status.try_into().unwrap(),
+            details: details.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn problem_test_results() {
+        let problems = [
+            TestStatus::FAIL,
+            TestStatus::FATAL,
+            TestStatus::TIMEOUT,
+            TestStatus::INFRA_FAILURE,
+            TestStatus::LISTING_FAILED,
+            TestStatus::UNKNOWN,
+        ];
+        for status in problems {
+            assert!(is_test_result_problem(&test_result(status, "")).unwrap());
+        }
+
+        let non_problems = [
+            TestStatus::PASS,
+            TestStatus::LISTING_SUCCESS,
+            TestStatus::SKIP,
+            TestStatus::OMITTED,
+            TestStatus::RERUN,
+        ];
+        for status in non_problems {
+            assert!(!is_test_result_problem(&test_result(status, "")).unwrap());
+        }
+    }
+
+    #[test]
+    fn oneline_summary_has_prefix_and_name() {
+        let result = test_result(TestStatus::PASS, "");
+        let line =
+            test_result_oneline(result.status, &result.name, test_result_duration(&result)).unwrap();
+        let rendered = line.fmt_for_test().to_string();
+        assert!(rendered.contains("Pass"), "unexpected render: {rendered}");
+        assert!(rendered.contains("example_test"), "unexpected render: {rendered}");
+    }
     fn action_execution_event(identifier: &str) -> BuckEvent {
         BuckEvent::new(
             UNIX_EPOCH,
