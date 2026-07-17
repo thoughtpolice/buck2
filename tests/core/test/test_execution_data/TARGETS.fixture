@@ -1,4 +1,4 @@
-load(":rules.bzl", "simple_test")
+load(":rules.bzl", "internal_cache_test", "simple_test")
 
 simple_test(name = "test")
 
@@ -6,4 +6,9 @@ simple_test(
     name = "cacheable_test",
     seed = read_config("test", "seed", ""),
     supports_test_execution_caching = True,
+)
+
+internal_cache_test(
+    name = "internal_cacheable_test",
+    seed = read_config("test", "seed", ""),
 )
