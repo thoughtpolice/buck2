@@ -8,9 +8,46 @@
 
 # pyre-strict
 
+from typing import List
+
 from buck2.tests.e2e_util.api.buck import Buck
-from buck2.tests.e2e_util.buck_workspace import buck_test
-from buck2.tests.e2e_util.helper.utils import random_string, read_what_ran
+from buck2.tests.e2e_util.buck_workspace import buck_test, env
+from buck2.tests.e2e_util.helper.utils import (
+    filter_events,
+    random_string,
+    read_what_ran,
+)
+
+
+async def _run_local_test_and_check_cache_upload(
+    buck: Buck, args: List[str]
+) -> None:
+    await buck.test(*args)
+
+    what_ran = await read_what_ran(buck, "--emit-cache-queries")
+    test_run_cache_queries = [
+        entry
+        for entry in what_ran
+        if entry["reason"] == "test.run"
+        and entry.get("reproducer", {}).get("executor") == "CacheQuery"
+    ]
+    assert len(test_run_cache_queries) == 1, (
+        "Expected exactly one test.run ActionCache query"
+    )
+    test_run_digest = test_run_cache_queries[0]["reproducer"]["details"]["digest"]
+
+    cache_uploads = await filter_events(
+        buck, "Event", "data", "SpanEnd", "data", "CacheUpload"
+    )
+    test_run_uploads = [
+        upload
+        for upload in cache_uploads
+        if upload.get("action_digest") == test_run_digest
+    ]
+    assert len(test_run_uploads) == 1, (
+        "Expected exactly one cache upload for the local test.run action"
+    )
+    assert test_run_uploads[0]["success"], "Expected the test.run cache upload to succeed"
 
 
 @buck_test()
@@ -154,6 +191,54 @@ async def test_remote_test_execution_not_cached_for_stress_runs(buck: Buck) -> N
         assert executor == "Re", (
             f"Expected Re executor for stress runs, got: {executor}"
         )
+
+
+@buck_test()
+@env("BUCK2_TEST_SKIP_ACTION_CACHE_WRITE", "true")
+async def test_local_external_runner_test_execution_uploaded_to_cache(
+    buck: Buck,
+) -> None:
+    await _run_local_test_and_check_cache_upload(
+        buck,
+        [
+            "-c",
+            "test.local_enabled=true",
+            "-c",
+            "test.remote_enabled=false",
+            "-c",
+            "test.remote_cache_enabled=true",
+            "-c",
+            "test.allow_cache_uploads=true",
+            "-c",
+            f"test.seed={random_string()}",
+            "//:cacheable_test",
+        ],
+    )
+
+
+@buck_test()
+@env("BUCK2_TEST_SKIP_ACTION_CACHE_WRITE", "true")
+async def test_local_internal_runner_test_execution_uploaded_to_cache(
+    buck: Buck,
+) -> None:
+    await _run_local_test_and_check_cache_upload(
+        buck,
+        [
+            "-c",
+            "test.local_enabled=true",
+            "-c",
+            "test.remote_enabled=false",
+            "-c",
+            "test.remote_cache_enabled=true",
+            "-c",
+            "test.allow_cache_uploads=true",
+            "-c",
+            "test.use_internal_runner=internal_cache_test",
+            "-c",
+            f"test.seed={random_string()}",
+            "//:internal_cacheable_test",
+        ],
+    )
 
 
 @buck_test()
