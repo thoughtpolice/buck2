@@ -200,7 +200,7 @@ impl OwnedTestInfo {
     fn supports_test_execution_caching(&self) -> bool {
         match self {
             Self::External(info) => info.supports_test_execution_caching(),
-            Self::Internal(_) => false,
+            Self::Internal(info) => info.supports_test_execution_caching(),
         }
     }
 
