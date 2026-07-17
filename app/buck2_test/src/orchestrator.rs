@@ -1214,6 +1214,10 @@ impl BuckTestOrchestrator<'_> {
             WaitingData::new(),
         );
         let digest_config = dice.global_data().get_digest_config();
+        let allow_test_cache_upload = dice
+            .per_transaction_data()
+            .get_run_action_knobs()
+            .default_allow_test_cache_upload;
 
         let test_target = TestTarget {
             target: test_target_label.target(),
@@ -1349,7 +1353,10 @@ impl BuckTestOrchestrator<'_> {
                         (result, end)
                     })
                     .await;
-                if supports_test_execution_caching && result.was_locally_executed() {
+                if supports_test_execution_caching
+                    && allow_test_cache_upload
+                    && result.was_locally_executed()
+                {
                     let info = CacheUploadInfo {
                         target: &test_target as _,
                         digest_config,

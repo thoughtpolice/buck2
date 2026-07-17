@@ -28,6 +28,9 @@ pub struct RunActionKnobs {
     /// Default for per-action `allow_cache_upload`, to make it opt-out instead of opt-in.
     pub default_allow_cache_upload: bool,
 
+    /// Whether cacheable tests may upload successful local executions to the action cache.
+    pub default_allow_test_cache_upload: bool,
+
     pub action_paths_interner:
         Option<DashMapDirectoryInterner<ActionDirectoryMember, TrackedFileDigest>>,
 
