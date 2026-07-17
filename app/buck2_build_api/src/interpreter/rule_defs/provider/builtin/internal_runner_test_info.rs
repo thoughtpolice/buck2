@@ -139,6 +139,9 @@ pub struct InternalRunnerTestInfoGen<V: ValueLifetimeless> {
     /// command related to test execution, including listing.
     worker: ValueOfUncheckedGeneric<V, FrozenWorkerInfo>,
 
+    /// Whether test execution results can be read from the remote action cache.
+    supports_test_execution_caching: ValueOfUncheckedGeneric<V, bool>,
+
     /// A Starlark callable that parses test listing output into structured test
     /// entries. The callback signature is:
     ///
@@ -258,6 +261,14 @@ impl FrozenInternalRunnerTestInfo {
 
     pub fn worker(&self) -> Option<&WorkerInfo<'_>> {
         unpack_opt_worker(self.worker.get().to_value()).unwrap()
+    }
+
+    pub fn supports_test_execution_caching(&self) -> bool {
+        NoneOr::<bool>::unpack_value(self.supports_test_execution_caching.get().to_value())
+            .unwrap()
+            .unwrap()
+            .into_option()
+            .unwrap_or(false)
     }
 
     pub fn parse_test_listing(&self) -> FrozenValue {
@@ -551,6 +562,10 @@ where
     unpack_opt_executor(info.default_executor.get().to_value())
         .buck_error_context("Invalid `default_executor`")?;
     unpack_opt_worker(info.worker.get().to_value()).buck_error_context("Invalid `worker`")?;
+    NoneOr::<bool>::unpack_value(info.supports_test_execution_caching.get().to_value())?
+        .ok_or_else(|| {
+            internal_error!("`supports_test_execution_caching` must be a bool if provided")
+        })?;
 
     // Both parse_test_listing and parse_test_result are required callables.
     let ptl = info.parse_test_listing.get().to_value();
@@ -600,6 +615,7 @@ fn internal_runner_test_info_creator(globals: &mut GlobalsBuilder) {
         #[starlark(default = NoneType)] local_resources: Value<'v>,
         #[starlark(default = NoneType)] required_local_resources: Value<'v>,
         #[starlark(default = NoneType)] worker: Value<'v>,
+        #[starlark(default = NoneType)] supports_test_execution_caching: Value<'v>,
     ) -> starlark::Result<InternalRunnerTestInfo<'v>> {
         let res = InternalRunnerTestInfo {
             test_type: ValueOfUnchecked::new(r#type),
@@ -615,6 +631,7 @@ fn internal_runner_test_info_creator(globals: &mut GlobalsBuilder) {
             local_resources: ValueOfUnchecked::new(local_resources),
             required_local_resources: ValueOfUnchecked::new(required_local_resources),
             worker: ValueOfUnchecked::new(worker),
+            supports_test_execution_caching: ValueOfUnchecked::new(supports_test_execution_caching),
             parse_test_listing: ValueOfUnchecked::new(parse_test_listing),
             parse_test_result: ValueOfUnchecked::new(parse_test_result),
         };

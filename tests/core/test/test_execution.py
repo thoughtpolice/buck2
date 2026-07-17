@@ -96,6 +96,36 @@ async def test_remote_test_execution_cached(buck: Buck) -> None:
 
 
 @buck_test()
+async def test_internal_runner_remote_test_execution_cached(buck: Buck) -> None:
+    seed = random_string()
+    args = [
+        "-c",
+        "test.local_enabled=false",
+        "-c",
+        "test.remote_enabled=true",
+        "-c",
+        "test.use_internal_runner=internal_cache_test",
+        "-c",
+        f"test.seed={seed}",
+        "//:internal_cacheable_test",
+    ]
+
+    await buck.test(*args)
+
+    await buck.test(*args)
+    second_what_ran = await read_what_ran(buck, "--emit-cache-queries")
+    second_test_runs = [
+        entry
+        for entry in second_what_ran
+        if entry["reason"] == "test.run"
+        and entry.get("reproducer", {}).get("executor") == "Cache"
+    ]
+    assert len(second_test_runs) == 1, (
+        f"Expected exactly one cached internal test.run entry, got {len(second_test_runs)}"
+    )
+
+
+@buck_test()
 async def test_remote_test_execution_not_cached_for_stress_runs(buck: Buck) -> None:
     args = [
         "-c",
