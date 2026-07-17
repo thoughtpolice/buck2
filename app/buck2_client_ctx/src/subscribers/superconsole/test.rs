@@ -8,7 +8,11 @@
  * above-listed licenses.
  */
 
+use std::collections::VecDeque;
+use std::time::Duration;
+
 use buck2_error::internal_error;
+use buck2_event_observer::display;
 use buck2_event_observer::test_state::TestState;
 use crossterm::style::Color;
 use crossterm::style::ContentStyle;
@@ -181,6 +185,71 @@ impl Component for TestHeader<'_> {
         } else {
             Ok(Lines::new())
         }
+    }
+}
+
+/// Number of finished tests retained for the streaming window. The window only
+/// ever renders the most recent `max_lines`, so this just needs to comfortably
+/// exceed any plausible `[ui] thread_line_limit`.
+pub(crate) const FINISHED_TESTS_CAPACITY: usize = 500;
+
+/// A finished test result retained for the streaming finished-tests window.
+pub(crate) struct FinishedTest {
+    status: i32,
+    name: String,
+    duration: Option<Duration>,
+}
+
+impl FinishedTest {
+    pub(crate) fn new(result: &buck2_data::TestResult) -> Self {
+        Self {
+            status: result.status,
+            name: result.name.clone(),
+            duration: display::test_result_duration(result),
+        }
+    }
+}
+
+/// A bounded, live-rendered window of the most recently finished tests, drawn in
+/// the style of the running-actions list. Bounded by `[ui] thread_line_limit`
+/// (`max_lines`) so a large run's finished tests never grow the scrollback.
+pub(crate) struct FinishedTestList<'a> {
+    pub(crate) finished: &'a VecDeque<FinishedTest>,
+    pub(crate) max_lines: usize,
+}
+
+impl Component for FinishedTestList<'_> {
+    type Error = buck2_error::Error;
+
+    fn draw_unchecked(&self, dimensions: Dimensions, mode: DrawMode) -> buck2_error::Result<Lines> {
+        // This window is part of the ephemeral live canvas; problem results are
+        // still emitted to the scrollback and the end-of-run summary is printed
+        // separately, so it draws nothing on the final render.
+        if matches!(mode, DrawMode::Final) || self.finished.is_empty() {
+            return Ok(Lines::new());
+        }
+
+        // One row is spent on the rule above the results and one on the blank
+        // line that keeps them from running into the build progress below;
+        // show the most recent results in between and let older ones scroll
+        // out of the window.
+        let shown = self.max_lines.saturating_sub(2).min(self.finished.len());
+        if shown == 0 {
+            return Ok(Lines::new());
+        }
+
+        // A rule separates the window from the components above, matching the
+        // running-actions list below it.
+        let mut lines = vec![Line::unstyled(&"─".repeat(dimensions.width))?];
+        for finished in self.finished.iter().skip(self.finished.len() - shown) {
+            lines.push(display::test_result_oneline(
+                finished.status,
+                &finished.name,
+                finished.duration,
+            )?);
+        }
+        lines.push(Line::default());
+        Ok(Lines(lines))
     }
 }
 

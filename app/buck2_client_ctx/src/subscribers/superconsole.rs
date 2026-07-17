@@ -9,6 +9,7 @@
  */
 
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -66,6 +67,9 @@ use crate::subscribers::superconsole::io::IoHeader;
 use crate::subscribers::superconsole::re::ReHeader;
 use crate::subscribers::superconsole::session_info::SessionInfoComponent;
 use crate::subscribers::superconsole::system_warning::SystemWarningComponent;
+use crate::subscribers::superconsole::test::FINISHED_TESTS_CAPACITY;
+use crate::subscribers::superconsole::test::FinishedTest;
+use crate::subscribers::superconsole::test::FinishedTestList;
 use crate::subscribers::superconsole::test::TestHeader;
 use crate::subscribers::superconsole::timed_list::Cutoffs;
 use crate::subscribers::superconsole::timed_list::TimedList;
@@ -392,6 +396,9 @@ pub struct SuperConsoleState {
     simple_console: SimpleConsole<DebugEventObserverExtra>,
     config: SuperConsoleConfig,
     active_warnings: Option<Vec<DisplayReport>>,
+    /// Most recently finished tests, rendered in the bounded finished-tests
+    /// window (`[ui] slim_test_output`). Empty unless slim mode is active.
+    finished_tests: VecDeque<FinishedTest>,
 }
 
 impl SuperConsoleState {
@@ -412,6 +419,9 @@ pub struct SuperConsoleConfig {
     /// Two lines for root events with single child event.
     pub two_lines: bool,
     pub max_lines: usize,
+    /// Hide per-test scrollback lines for non-problem test results, leaving
+    /// them to the live counters (`[ui] slim_test_output`).
+    pub slim_test_output: bool,
 }
 
 impl Default for SuperConsoleConfig {
@@ -426,6 +436,7 @@ impl Default for SuperConsoleConfig {
             display_platform: false,
             two_lines: false,
             max_lines: 10,
+            slim_test_output: true,
         }
     }
 }
@@ -607,6 +618,13 @@ impl Component for BuckRootComponent<'_> {
             },
             mode,
         )?;
+        draw.draw(
+            &FinishedTestList {
+                finished: &self.state.finished_tests,
+                max_lines: self.state.config.max_lines,
+            },
+            mode,
+        )?;
         draw.draw(&TasksHeader::new(self.header, self.state), mode)?;
         draw.draw(&TimedList::new(&CUTOFFS, self.state), mode)?;
 
@@ -749,6 +767,7 @@ impl SuperConsoleState {
             ),
             config,
             active_warnings: None,
+            finished_tests: VecDeque::new(),
         })
     }
 
@@ -1070,6 +1089,25 @@ impl StatefulSuperConsoleImpl {
         &mut self,
         result: &buck2_data::TestResult,
     ) -> buck2_error::Result<()> {
+        // In slim mode finished tests stream through the bounded finished-tests
+        // window instead of growing the scrollback; only problems additionally
+        // get a persistent line (with their details). High verbosity (`-v`) and
+        // `[ui] slim_test_output = false` fall back to the normal per-result
+        // output.
+        let windowed = self.state.config.slim_test_output && !self.verbosity.print_all_commands();
+
+        if windowed {
+            let finished = &mut self.state.finished_tests;
+            if finished.len() >= FINISHED_TESTS_CAPACITY {
+                finished.pop_front();
+            }
+            finished.push_back(FinishedTest::new(result));
+
+            if !display::is_test_result_problem(result)? {
+                return Ok(());
+            }
+        }
+
         if let Some(msg) = display::format_test_result(result, self.verbosity)? {
             let byte_count: usize = msg.0.iter().map(|line| line.len()).sum();
             match self.state.simple_console.output_limit.emit(byte_count) {
@@ -1090,7 +1128,12 @@ impl StatefulSuperConsoleImpl {
         &mut self,
         prefs: &buck2_data::ConsolePreferences,
     ) -> buck2_error::Result<()> {
-        self.state.config.max_lines = prefs.max_lines.try_into()?;
+        if let Some(max_lines) = prefs.max_lines {
+            self.state.config.max_lines = max_lines.try_into()?;
+        }
+        if let Some(slim_test_output) = prefs.slim_test_output {
+            self.state.config.slim_test_output = slim_test_output;
+        }
 
         Ok(())
     }
@@ -1681,6 +1724,7 @@ mod tests {
     use dupe::Dupe;
     use superconsole::testing::SuperConsoleTestingExt;
     use superconsole::testing::assert_frame_contains;
+    use superconsole::testing::frame_contains;
     use superconsole::testing::test_console;
 
     use super::*;
@@ -1999,6 +2043,139 @@ mod tests {
                 .contains("RE session: reSessionID-123\nNetwork:    up 10MiB  down 1.5GiB"),
             "unexpected render:\n{final_render}"
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_slim_test_output() -> buck2_error::Result<()> {
+        async fn frame_after_test_results(
+            config: SuperConsoleConfig,
+            prefs: Option<buck2_data::ConsolePreferences>,
+            results: &[(String, buck2_data::TestStatus)],
+        ) -> buck2_error::Result<Vec<u8>> {
+            let trace_id = TraceId::new();
+            let now = SystemTime::now();
+            let tick = Tick::now();
+
+            let mut console = StatefulSuperConsole::new(
+                "test",
+                trace_id.dupe(),
+                test_console(),
+                Verbosity::default(),
+                true,
+                Timekeeper::new(
+                    Box::new(RealtimeClock),
+                    EventTimestamp(SystemTime::now().into()),
+                ),
+                config,
+                None,
+            )?;
+
+            if let Some(prefs) = prefs {
+                console
+                    .handle_event(&Arc::new(BuckEvent::new(
+                        now,
+                        trace_id.dupe(),
+                        None,
+                        None,
+                        buck2_data::InstantEvent {
+                            data: Some(prefs.into()),
+                        }
+                        .into(),
+                    )))
+                    .await?;
+            }
+
+            for (name, status) in results {
+                console
+                    .handle_event(&Arc::new(BuckEvent::new(
+                        now,
+                        trace_id.dupe(),
+                        None,
+                        None,
+                        buck2_data::InstantEvent {
+                            data: Some(
+                                buck2_data::TestResult {
+                                    name: name.to_owned(),
+                                    status: *status as i32,
+                                    ..Default::default()
+                                }
+                                .into(),
+                            ),
+                        }
+                        .into(),
+                    )))
+                    .await?;
+            }
+
+            console.tick(&tick).await?;
+
+            let frame = match &mut console {
+                StatefulSuperConsole::Running(c) => c
+                    .super_console
+                    .test_output_mut()
+                    .frames
+                    .pop()
+                    .ok_or_else(|| internal_error!("No frame was emitted"))?,
+                StatefulSuperConsole::Finalized(_) => {
+                    panic!("Console was downgraded");
+                }
+            };
+            Ok(frame)
+        }
+
+        let pass_fail = [
+            ("test_pass".to_owned(), buck2_data::TestStatus::Pass),
+            ("test_fail".to_owned(), buck2_data::TestStatus::Fail),
+        ];
+
+        // Default config is slim: passing tests show up only in the live
+        // finished-tests window, failures also emit a persistent line. Both are
+        // present in the rendered frame.
+        let frame = frame_after_test_results(Default::default(), None, &pass_fail).await?;
+        assert_frame_contains(&frame, "test_pass");
+        assert_frame_contains(&frame, "test_fail");
+
+        // The window is bounded by max_lines (default 10): with more finished
+        // tests than fit, only the most recent survive; older ones scroll out
+        // and — being passes — leave no scrollback line at all.
+        let many: Vec<_> = (0..14)
+            .map(|i| (format!("windowtest_{i:02}"), buck2_data::TestStatus::Pass))
+            .collect();
+        let frame = frame_after_test_results(Default::default(), None, &many).await?;
+        assert_frame_contains(&frame, "windowtest_13");
+        assert_frame_contains(&frame, "windowtest_06");
+        assert!(!frame_contains(&frame, "windowtest_05"));
+        assert!(!frame_contains(&frame, "windowtest_00"));
+
+        // Toggled off in config: no finished-tests window. Failures still
+        // print; a quiet pass is left to the normal console output, which
+        // upstream omits when it carries no details.
+        let frame = frame_after_test_results(
+            SuperConsoleConfig {
+                slim_test_output: false,
+                ..Default::default()
+            },
+            None,
+            &pass_fail,
+        )
+        .await?;
+        assert_frame_contains(&frame, "test_fail");
+        assert!(!frame_contains(&frame, "test_pass"));
+
+        // Toggled off via a ConsolePreferences event (`[ui] slim_test_output`).
+        let frame = frame_after_test_results(
+            Default::default(),
+            Some(buck2_data::ConsolePreferences {
+                max_lines: None,
+                slim_test_output: Some(false),
+            }),
+            &pass_fail,
+        )
+        .await?;
+        assert_frame_contains(&frame, "test_fail");
+        assert!(!frame_contains(&frame, "test_pass"));
 
         Ok(())
     }
