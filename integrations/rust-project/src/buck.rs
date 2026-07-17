@@ -50,15 +50,32 @@ use crate::target::TargetInfo;
 const CLIENT_METADATA_RUST_PROJECT: &str = "--client-metadata=id=rust-project";
 
 fn crate_cfg(
+    target: &Target,
     info: &TargetInfo,
     global_extra_cfgs: &[String],
     first_party_extra_cfgs: &[String],
 ) -> Vec<String> {
+    // `first_party_extra_cfgs` is `["test"]`: a crate may advertise `cfg(test)`
+    // only when it is actually compiled as a test. That is either a test target,
+    // or a library that absorbed its generated `<target>-unittest` (the fbcode
+    // model; see `merge_unit_test_targets`, whose merge condition this mirrors).
+    //
+    // A plain library must NOT claim `cfg(test)`. If it does, a repo that models
+    // unit tests as a *separate* target sharing the library's crate root (e.g. a
+    // colocated `:unit`) yields a library crate and a test crate that are
+    // identical in (root, cfg, edition, env); rust-analyzer collapses them into
+    // one node, drags the test's dev-only deps into the library, and the crate
+    // graph gains cycles (e.g. `lib -> testutils -> lib`).
+    let is_test_compilation = info.kind == Kind::Test
+        || info
+            .test_deps
+            .contains(&Target::new(format!("{target}-unittest")));
+
     info.cfg()
         .into_iter()
         .chain(global_extra_cfgs.iter().cloned())
         .chain(
-            (!info.is_reindeer_third_party())
+            (!info.is_reindeer_third_party() && is_test_compilation)
                 .then(|| first_party_extra_cfgs.iter().cloned())
                 .into_iter()
                 .flatten(),
@@ -229,7 +246,7 @@ pub(crate) fn to_project_json(
                 include_dirs,
                 exclude_dirs: vec![],
             }),
-            cfg: crate_cfg(info, global_extra_cfgs, first_party_extra_cfgs),
+            cfg: crate_cfg(target, info, global_extra_cfgs, first_party_extra_cfgs),
             env,
             build,
             is_proc_macro: info.proc_macro.unwrap_or(false),
@@ -1408,11 +1425,11 @@ fn integration_tests_preserved() {
 
 #[test]
 fn test_cfg_scoped_to_first_party() {
-    let make_info = |label: &str| TargetInfo {
+    let make_info = |label: &str, kind: Kind, test_deps: Vec<Target>| TargetInfo {
         name: "foo".to_owned(),
         label: label.to_owned(),
         labels: vec![],
-        kind: Kind::Library,
+        kind,
         edition: None,
         srcs: vec![],
         mapped_srcs: FxHashMap::default(),
@@ -1420,7 +1437,7 @@ fn test_cfg_scoped_to_first_party() {
         crate_dynamic: None,
         crate_root: PathBuf::default(),
         deps: vec![],
-        test_deps: vec![],
+        test_deps,
         named_deps: FxHashMap::default(),
         proc_macro: None,
         features: vec![],
@@ -1434,19 +1451,54 @@ fn test_cfg_scoped_to_first_party() {
     let global_extra_cfgs = &["fbcode_build".to_owned()];
     let first_party_extra_cfgs = &["test".to_owned()];
 
-    // First-party crate gets both `test` and `fbcode_build`, regardless of
-    // workspace membership (`in_workspace` is false here).
-    let first_party = crate_cfg(
-        &make_info("fbcode//buck2/integrations/rust-project:rust-project"),
+    let fp_label = "fbcode//buck2/integrations/rust-project:rust-project";
+
+    // A first-party *library* is not compiled as a test, so it must NOT get
+    // `cfg(test)`: otherwise it becomes indistinguishable (same root + cfg) from
+    // a colocated same-root unit-test crate, which rust-analyzer collapses,
+    // dragging test-only deps into the library and forming crate-graph cycles.
+    // It still gets the global `fbcode_build`.
+    let lib = crate_cfg(
+        &Target::new(fp_label),
+        &make_info(fp_label, Kind::Library, vec![]),
         global_extra_cfgs,
         first_party_extra_cfgs,
     );
-    assert!(first_party.contains(&"test".to_owned()));
-    assert!(first_party.contains(&"fbcode_build".to_owned()));
+    assert!(!lib.contains(&"test".to_owned()));
+    assert!(lib.contains(&"fbcode_build".to_owned()));
 
-    // Reindeer-vendored third-party crate keeps `fbcode_build` but not `test`.
+    // A first-party *test* target is compiled as a test and gets `cfg(test)`.
+    let test = crate_cfg(
+        &Target::new(fp_label),
+        &make_info(fp_label, Kind::Test, vec![]),
+        global_extra_cfgs,
+        first_party_extra_cfgs,
+    );
+    assert!(test.contains(&"test".to_owned()));
+    assert!(test.contains(&"fbcode_build".to_owned()));
+
+    // A first-party library that absorbed its generated `<target>-unittest` (the
+    // fbcode model, see `merge_unit_test_targets`) represents the test compile,
+    // so it keeps `cfg(test)`.
+    let merged_label = "fbcode//foo:foo";
+    let merged = crate_cfg(
+        &Target::new(merged_label),
+        &make_info(
+            merged_label,
+            Kind::Library,
+            vec![Target::new("fbcode//foo:foo-unittest")],
+        ),
+        global_extra_cfgs,
+        first_party_extra_cfgs,
+    );
+    assert!(merged.contains(&"test".to_owned()));
+
+    // A reindeer-vendored third-party crate keeps `fbcode_build` but never gets
+    // `test`, even if it were somehow a test compile.
+    let vendored_label = "fbsource//third-party/rust/vendor/tokio:1";
     let vendored = crate_cfg(
-        &make_info("fbsource//third-party/rust/vendor/tokio:1"),
+        &Target::new(vendored_label),
+        &make_info(vendored_label, Kind::Test, vec![]),
         global_extra_cfgs,
         first_party_extra_cfgs,
     );
