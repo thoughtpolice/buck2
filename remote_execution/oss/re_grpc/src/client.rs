@@ -103,6 +103,17 @@ use crate::response::*;
 
 const DEFAULT_MAX_TOTAL_BATCH_SIZE: usize = 4 * 1000 * 1000;
 
+/// Metadata key used to send the RE session ID on every outbound request, so
+/// that server-side logs and L7 proxies can correlate requests with the
+/// session ID buck2 reports to the user (console, errors, invocation records).
+const RBE_SESSION_ID_HEADER: &str = "rbe-session-id";
+
+/// Metadata key used to send the per-invocation build ID alongside each
+/// request. Unlike `tool_invocation_id` inside the binary REAPI
+/// `RequestMetadata`, this is plain ASCII and thus visible to observability
+/// tools that don't decode REAPI protos.
+const RBE_BUILD_ID_HEADER: &str = "rbe-build-id";
+
 fn tdigest_to(tdigest: TDigest) -> Digest {
     Digest {
         hash: tdigest.hash,
@@ -240,7 +251,13 @@ impl REClientBuilder {
         let capabilities_channel = create_channel(&channel_config, engine_address)
             .context("Error creating Capabilities channel")?;
 
-        let interceptor = InjectHeadersInterceptor::new(&opts.http_headers)?;
+        // Unique ID for this client instantiation. The RE session spans every
+        // command that shares this client (the daemon drops it when idle), and
+        // the ID is both shown to the user and attached to every outbound
+        // request for correlation with server-side logs.
+        let session_id = uuid::Uuid::new_v4().to_string();
+
+        let interceptor = InjectHeadersInterceptor::new(&opts.http_headers, &session_id)?;
 
         let mut capabilities_client =
             CapabilitiesClient::with_interceptor(capabilities_channel, interceptor.dupe());
@@ -331,6 +348,7 @@ impl REClientBuilder {
             cas_address,
             engine_address.clone(),
             action_cache_address,
+            session_id,
         ))
     }
 
@@ -390,8 +408,8 @@ struct InjectHeadersInterceptor {
 }
 
 impl InjectHeadersInterceptor {
-    pub fn new(headers: &[HttpHeader]) -> anyhow::Result<Self> {
-        let headers = headers
+    pub fn new(headers: &[HttpHeader], session_id: &str) -> anyhow::Result<Self> {
+        let mut headers: Vec<_> = headers
             .iter()
             .map(|h| {
                 // This means we can't have `$` in a header key or value, which isn't great. On the
@@ -410,6 +428,17 @@ impl InjectHeadersInterceptor {
             })
             .collect::<Result<_, _>>()
             .context("Error converting headers")?;
+
+        // A user-configured header with the same key takes precedence.
+        if !headers
+            .iter()
+            .any(|(k, _)| k.as_str() == RBE_SESSION_ID_HEADER)
+        {
+            headers.push((
+                MetadataKey::from_static(RBE_SESSION_ID_HEADER),
+                MetadataValue::try_from(session_id).context("Invalid session ID")?,
+            ));
+        }
 
         Ok(Self {
             headers: Arc::new(headers),
@@ -477,6 +506,9 @@ pub struct REClient {
     cas_address: String,
     engine_address: String,
     action_cache_address: String,
+    /// Unique UUID for this client instantiation, shown to the user and sent
+    /// to the server on every request.
+    session_id: String,
 }
 
 impl Drop for REClient {
@@ -628,6 +660,7 @@ impl REClient {
         cas_address: String,
         engine_address: String,
         action_cache_address: String,
+        session_id: String,
     ) -> Self {
         REClient {
             runtime_opts,
@@ -645,6 +678,7 @@ impl REClient {
             cas_address,
             engine_address,
             action_cache_address,
+            session_id,
         }
     }
 
@@ -665,6 +699,7 @@ impl REClient {
                     },
                     metadata.clone(),
                     self.runtime_opts.use_fbcode_metadata,
+                    &self.session_id,
                 ))
                 .await?;
 
@@ -697,6 +732,7 @@ impl REClient {
                     },
                     metadata.clone(),
                     self.runtime_opts.use_fbcode_metadata,
+                    &self.session_id,
                 ))
                 .await?;
 
@@ -737,6 +773,7 @@ impl REClient {
                     },
                     metadata.clone(),
                     self.runtime_opts.use_fbcode_metadata,
+                    &self.session_id,
                 ))
                 .await?
                 .into_inner();
@@ -859,6 +896,7 @@ impl REClient {
                             re_request,
                             metadata,
                             self.runtime_opts.use_fbcode_metadata,
+                            &self.session_id,
                         ))
                         .await?;
                     Ok(resp.into_inner())
@@ -874,6 +912,7 @@ impl REClient {
                             futures::stream::iter(segments),
                             metadata,
                             self.runtime_opts.use_fbcode_metadata,
+                            &self.session_id,
                         ))
                         .await?;
                     Ok(resp.into_inner())
@@ -928,6 +967,7 @@ impl REClient {
                             re_request,
                             metadata,
                             self.runtime_opts.use_fbcode_metadata,
+                            &self.session_id,
                         ))
                         .await?;
                     Ok(resp.into_inner())
@@ -943,6 +983,7 @@ impl REClient {
                             read_request,
                             metadata,
                             self.runtime_opts.use_fbcode_metadata,
+                            &self.session_id,
                         ))
                         .await?
                         .into_inner();
@@ -997,6 +1038,7 @@ impl REClient {
                             },
                             metadata.clone(),
                             self.runtime_opts.use_fbcode_metadata,
+                            &self.session_id,
                         ))
                         .await
                         .context("Failed to request what blobs are not present on remote")?;
@@ -1099,8 +1141,7 @@ impl REClient {
     }
 
     pub fn get_session_id(&self) -> &str {
-        // TODO(aloiscochard): Return a unique ID, ideally from the GRPC client
-        "GRPC-SESSION-ID"
+        &self.session_id
     }
 
     pub fn get_experiment_name(&self) -> anyhow::Result<Option<String>> {
@@ -1739,6 +1780,7 @@ fn with_re_metadata<T>(
     t: T,
     metadata: RemoteExecutionMetadata,
     use_fbcode_metadata: bool,
+    session_id: &str,
 ) -> tonic::Request<T> {
     // This creates a new Tonic request with attached metadata for the RE
     // backend. There are two cases here we need to support:
@@ -1758,6 +1800,8 @@ fn with_re_metadata<T>(
     // could test the OSS Bazel API in the upstream GitHub CI, but doing it this
     // way is only a little ugly, it's hidden, and it helps ensure the internal
     // Meta builds catch those issues earlier.
+
+    let buck_info = metadata.buck_info.clone().unwrap_or_default();
 
     let mut msg = tonic::Request::new(t);
 
@@ -1792,14 +1836,20 @@ fn with_re_metadata<T>(
         RequestMetadata {
             tool_details: Some(ToolDetails {
                 tool_name: "buck2".to_owned(),
-                // TODO(#503): Pull the BuckVersion::get_unique_id() from BuckDaemon
-                tool_version: "0.1.0".to_owned(),
+                tool_version: if buck_info.version.is_empty() {
+                    // TODO(#503): Pull the BuckVersion::get_unique_id() from BuckDaemon
+                    "0.1.0".to_owned()
+                } else {
+                    buck_info.version.clone()
+                },
             }),
             action_id: "".to_owned(),
-            tool_invocation_id: metadata
-                .buck_info
-                .map_or(String::new(), |buck_info| buck_info.build_id),
-            correlated_invocations_id: "".to_owned(),
+            tool_invocation_id: buck_info.build_id.clone(),
+            // There is no exact REAPI equivalent of an RE session (one client
+            // instantiation serving several invocations), but this field's
+            // purpose — tying multiple tool invocations together — is the
+            // closest match, and REAPI-aware servers index it natively.
+            correlated_invocations_id: session_id.to_owned(),
             action_mnemonic: "".to_owned(),
             target_id: "".to_owned(),
             configuration_id: "".to_owned(),
@@ -1812,6 +1862,19 @@ fn with_re_metadata<T>(
             MetadataValue::from_bytes(&encoded),
         );
     };
+
+    // Also send the build ID as a plain ASCII header: unlike the binary proto
+    // metadata above, any proxy or access log can index it without decoding
+    // REAPI protos. The session ID counterpart is attached to every request by
+    // `InjectHeadersInterceptor`. Skipped when the value cannot be represented
+    // as an ASCII metadata value; note the interceptor runs after this and
+    // overwrites same-named keys, so user-configured headers win here too.
+    if !buck_info.build_id.is_empty() {
+        if let Ok(value) = MetadataValue::try_from(&buck_info.build_id) {
+            msg.metadata_mut().insert(RBE_BUILD_ID_HEADER, value);
+        }
+    }
+
     msg
 }
 
@@ -2924,6 +2987,109 @@ mod tests {
         assert_eq!(substitute_env_vars_impl("foo", getter).unwrap(), "foo");
         assert_eq!(substitute_env_vars_impl("FOO", getter).unwrap(), "FOO");
         assert!(substitute_env_vars_impl("$FOO$BAZ", getter).is_err());
+    }
+
+    fn decode_request_metadata<T>(request: &tonic::Request<T>) -> RequestMetadata {
+        let bytes = request
+            .metadata()
+            .get_bin("build.bazel.remote.execution.v2.requestmetadata-bin")
+            .expect("missing REAPI request metadata")
+            .to_bytes()
+            .unwrap();
+        RequestMetadata::decode(bytes.as_ref()).unwrap()
+    }
+
+    #[test]
+    fn test_with_re_metadata_correlation_ids() {
+        let metadata = RemoteExecutionMetadata {
+            buck_info: Some(BuckInfo {
+                build_id: "some-build-id".to_owned(),
+                version: "some-version".to_owned(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let request = with_re_metadata((), metadata, false, "test-session-id");
+
+        let build_id_header = request.metadata().get(RBE_BUILD_ID_HEADER).unwrap();
+        assert_eq!(build_id_header.to_str().unwrap(), "some-build-id");
+
+        let decoded = decode_request_metadata(&request);
+        assert_eq!(decoded.tool_invocation_id, "some-build-id");
+        assert_eq!(decoded.correlated_invocations_id, "test-session-id");
+        assert_eq!(decoded.tool_details.unwrap().tool_version, "some-version");
+    }
+
+    #[test]
+    fn test_with_re_metadata_without_buck_info() {
+        let request = with_re_metadata(
+            (),
+            RemoteExecutionMetadata::default(),
+            false,
+            "test-session-id",
+        );
+
+        assert!(request.metadata().get(RBE_BUILD_ID_HEADER).is_none());
+
+        let decoded = decode_request_metadata(&request);
+        assert_eq!(decoded.tool_invocation_id, "");
+        assert_eq!(decoded.correlated_invocations_id, "test-session-id");
+        assert_eq!(decoded.tool_details.unwrap().tool_version, "0.1.0");
+    }
+
+    #[test]
+    fn test_with_re_metadata_fbcode() {
+        let metadata = RemoteExecutionMetadata {
+            buck_info: Some(BuckInfo {
+                build_id: "some-build-id".to_owned(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let request = with_re_metadata((), metadata, true, "test-session-id");
+
+        // The plain-text build ID header is attached regardless of which
+        // binary metadata flavor is in use.
+        let build_id_header = request.metadata().get(RBE_BUILD_ID_HEADER).unwrap();
+        assert_eq!(build_id_header.to_str().unwrap(), "some-build-id");
+        assert!(request.metadata().get_bin("re-metadata-bin").is_some());
+        assert!(
+            request
+                .metadata()
+                .get_bin("build.bazel.remote.execution.v2.requestmetadata-bin")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_inject_headers_interceptor_adds_session_id() {
+        let mut interceptor = InjectHeadersInterceptor::new(&[], "test-session-id").unwrap();
+        let request = interceptor.call(tonic::Request::new(())).unwrap();
+        assert_eq!(
+            request
+                .metadata()
+                .get(RBE_SESSION_ID_HEADER)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "test-session-id"
+        );
+    }
+
+    #[test]
+    fn test_inject_headers_interceptor_user_session_id_wins() {
+        let headers = vec![HttpHeader {
+            key: "RBE-Session-ID".to_owned(),
+            value: "user-override".to_owned(),
+        }];
+        let mut interceptor = InjectHeadersInterceptor::new(&headers, "test-session-id").unwrap();
+        let request = interceptor.call(tonic::Request::new(())).unwrap();
+        let values: Vec<_> = request
+            .metadata()
+            .get_all(RBE_SESSION_ID_HEADER)
+            .iter()
+            .collect();
+        assert_eq!(values, vec!["user-override"]);
     }
 }
 
