@@ -71,8 +71,8 @@ pub trait TestOrchestrator: Send + Sync {
         // ExternalRunnerTestInfo to work.
         executor_override: Option<ExecutorConfigOverride>,
         required_local_resources: RequiredLocalResources,
-        // When true, disables test execution cache lookups even if the test rule
-        // supports it.
+        // When true, disables test execution cache lookups and uploads even if
+        // the test rule supports them.
         disable_test_execution_caching: bool,
     ) -> buck2_error::Result<ExecuteResponse>;
 
