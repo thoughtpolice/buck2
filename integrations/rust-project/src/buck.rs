@@ -262,20 +262,53 @@ pub(crate) fn to_project_json(
         check_cycles_in_crate_graph(&crates);
     }
 
+    // Generate the test runnable's program and arguments with `Buck::command`
+    // so that the runnable respects `--buck2-command` and carries the same
+    // isolation dir, client metadata, and configuration as every other buck
+    // invocation made by rust-project.
+    let buck_test_command = buck.command(["test", "{label}"]);
+    let buck_test_program = buck_test_command.get_program().to_str().unwrap().to_owned();
+    // It is safe to call unwrap on these because we've constructed all the
+    // args from Rust strings (i.e. utf-8) so `to_str` will never return
+    // `None`.
+    let mut buck_test_args: Vec<String> = buck_test_command
+        .get_args()
+        .map(|a| a.to_str().unwrap().to_owned())
+        .collect();
+
+    buck_test_args.push("--".to_owned());
+
+    if cfg!(fbcode_build) {
+        buck_test_args.extend(["{test_id}".to_owned(), "--print-passing-details".to_owned()]);
+    } else {
+        // R-A substitutes {test_id} with e.g. `mycrate::tests::one`.
+        // --test-arg tells `buck2 test` to pass the following strings through
+        // to the test program, which we will assume to be the default rust
+        // test harness:
+        //
+        // - `--exact`: only run the test named exactly {test_id}. Rust allows
+        //   functions and modules to have the same name in the same namespace,
+        //   so a test name can be the prefix of another.
+        // - `--no-capture`: print the test's output, in the spirit of
+        //   `--print-passing-details` above.
+        //
+        // Same overall effect as
+        // `cargo test -- --exact --no-capture mycrate::tests::one`.
+        buck_test_args.extend([
+            "--test-arg".to_owned(),
+            "--exact".to_owned(),
+            "--no-capture".to_owned(),
+            "{test_id}".to_owned(),
+        ]);
+    }
+
     let mut runnables = vec![];
 
     #[cfg(fbcode_build)]
     {
         runnables.extend([Runnable {
-            program: "buck".to_owned(),
-            args: vec![
-                "test".to_owned(),
-                CLIENT_METADATA_RUST_PROJECT.to_owned(),
-                "{label}".to_owned(),
-                "--".to_owned(),
-                "{test_id}".to_owned(),
-                "--print-passing-details".to_owned(),
-            ],
+            program: buck_test_program,
+            args: buck_test_args,
             cwd: project_root.to_owned(),
             kind: RunnableKind::TestOne,
         }]);
