@@ -1,0 +1,33 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
+# License, Version 2.0 found in the LICENSE-APACHE file in the root directory
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
+
+# `stacker`'s Windows backend needs `__stacker_get_current_fiber`, which
+# `build.rs` compiles from `src/arch/windows.c`. Build scripts do not run here,
+# so the C file is supplied as a cxx_library instead.
+#
+# That alone is not enough: the backend also carries an unconditional
+# `#[link(name = "stacker")]`, which makes rustc emit `-l stacker` and the MSVC
+# linker demand a file literally named `stacker.lib` (LNK1181). Reindeer passes
+# cxx_library deps by full path as `lib<target>.lib`, so no fixup can produce
+# that name, and the `buildscript_run` route cannot help either: emitting the
+# build script's `-l`/`-L` needs `rustc_link_lib`/`rustc_link_search`, which
+# default to false and which reindeer never sets.
+#
+# So drop just that one attribute: `src/backends/windows.rs` is mapped over with
+# a copy identical but for the `#[link]` line. The symbol still resolves, from
+# the cxx_library archive on the link line. Pinned to =0.1.25 so a version bump
+# deactivates the patch and fails loudly at link rather than drifting silently.
+buildscript.run = false
+
+[['cfg(all(version = "=0.1.25", target_os = "windows", target_env = "msvc"))'.cxx_library]]
+name = "stacker-c-msvc"
+srcs = ["src/arch/windows.c"]
+preferred_linkage = "static"
+
+['cfg(all(version = "=0.1.25", target_os = "windows", target_env = "msvc"))']
+extra_mapped_srcs = { "//third-party/rust/fixups/stacker:windows.rs" = "src/backends/windows.rs" }
