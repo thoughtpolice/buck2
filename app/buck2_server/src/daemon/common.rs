@@ -243,6 +243,7 @@ impl HasCommandExecutor for CommandExecutorFactory {
                 project_fs: self.project_root.clone(),
                 revision: self.revision.dupe(),
                 materializer: self.materializer.dupe(),
+                blocking_executor: self.blocking_executor.dupe(),
                 re_client: re_client.dupe(),
                 invocation_re_use_case: self.invocation_re_use_case,
                 re_action_key: re_action_key.clone(),
@@ -340,6 +341,7 @@ impl HasCommandExecutor for CommandExecutorFactory {
                             Arc::new(RemoteDepFileCacheChecker {
                                 artifact_fs: artifact_fs.dupe(),
                                 materializer: self.materializer.dupe(),
+                                blocking_executor: self.blocking_executor.dupe(),
                                 re_client: re_client.dupe(),
                                 invocation_re_use_case: self.invocation_re_use_case,
                                 re_action_key: remote_options.re_action_key.clone(),
@@ -359,6 +361,7 @@ impl HasCommandExecutor for CommandExecutorFactory {
                             Arc::new(ActionCacheChecker {
                                 artifact_fs: artifact_fs.dupe(),
                                 materializer: self.materializer.dupe(),
+                                blocking_executor: self.blocking_executor.dupe(),
                                 re_client: re_client.dupe(),
                                 invocation_re_use_case: self.invocation_re_use_case,
                                 re_action_key: remote_options.re_action_key.clone(),
