@@ -55,6 +55,7 @@ struct Stats {
     re_max_upload_speeds: Vec<SlidingWindow>,
     hg_revision: Option<String>,
     git_revision: Option<String>,
+    jj: Option<buck2_data::JujutsuData>,
     has_local_changes: Option<bool>,
 }
 
@@ -124,6 +125,9 @@ impl Stats {
                         if let Some(ref revision) = vcs.git_revision {
                             self.git_revision = Some(revision.clone());
                         }
+                        if let Some(ref jj) = vcs.jj {
+                            self.jj = Some(jj.clone());
+                        }
                         if let Some(ref has_local_changes) = vcs.has_local_changes {
                             self.has_local_changes = Some(*has_local_changes);
                         }
@@ -160,6 +164,24 @@ impl Display for Stats {
 
         if let Some(git_revision) = &self.git_revision {
             writeln!(f, "- Git Revision: {git_revision}")?;
+        }
+
+        if let Some(jj) = &self.jj {
+            if let Some(change_id) = &jj.change_id {
+                writeln!(f, "- Jujutsu Change ID: {change_id}")?;
+            }
+            if let Some(workspace) = &jj.workspace {
+                writeln!(f, "- Jujutsu Workspace: {workspace}")?;
+            }
+            if let Some(backend) = &jj.backend {
+                writeln!(f, "- Jujutsu Backend: {backend}")?;
+            }
+            if let Some(colocated) = jj.colocated {
+                writeln!(f, "- Jujutsu Colocated: {colocated}")?;
+            }
+            if let Some(version) = &jj.version {
+                writeln!(f, "- Jujutsu Version: {version}")?;
+            }
         }
 
         if let Some(has_local_changes) = self.has_local_changes {
