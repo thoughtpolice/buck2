@@ -717,6 +717,13 @@ impl LocalExecutor {
             ..
         } = res;
 
+        // Write captured std streams to their requested output artifacts. This happens
+        // before output collection below so that the files are hashed and declared like
+        // any other output the command produced.
+        if let Err(e) = self.write_capture_artifacts(request, &stdout, &stderr) {
+            return manager.error("stdout_stderr_capture_failed", e);
+        }
+
         let std_streams = CommandStdStreams::Local { stdout, stderr };
 
         let mut timing = Box::new(CommandExecutionMetadata {
@@ -883,6 +890,33 @@ impl LocalExecutor {
         }
 
         result
+    }
+
+    /// Write the command's captured std streams to their requested output artifacts, if any.
+    /// The files are written to the same (placeholder-resolved) location that
+    /// `calculate_and_declare_output_values` collects outputs from, so a capture artifact is
+    /// subsequently hashed and declared like any other output the command produced, including
+    /// the move to its final location for content-based paths.
+    fn write_capture_artifacts(
+        &self,
+        request: &CommandExecutionRequest,
+        stdout: &[u8],
+        stderr: &[u8],
+    ) -> buck2_error::Result<()> {
+        for (path, bytes) in [
+            (request.stdout_artifact(), stdout),
+            (request.stderr_artifact(), stderr),
+        ] {
+            if let Some(path) = path {
+                let path = self
+                    .artifact_fs
+                    .resolve_build(path, Some(&ContentBasedPathHash::for_output_artifact()))?;
+                fs_util::write(self.root.join(&path), bytes)
+                    .uncategorized()
+                    .with_buck_error_context(|| format!("writing captured stream to {path:?}"))?;
+            }
+        }
+        Ok(())
     }
 
     async fn calculate_and_declare_output_values(
@@ -1822,6 +1856,7 @@ mod tests {
             None,
             None,
             DaemonId::new(),
+            LocalSandboxMode::Disabled,
         );
 
         Ok((executor, temp.path().root().to_buf(), temp))
@@ -1844,6 +1879,9 @@ mod tests {
                 false,
                 None,
                 futures::stream::pending(),
+                None,
+                None,
+                #[cfg(target_os = "linux")]
                 None,
             )
             .await?;
@@ -1888,6 +1926,9 @@ mod tests {
                 None,
                 futures::stream::pending(),
                 None,
+                None,
+                #[cfg(target_os = "linux")]
+                None,
             )
             .await?;
         assert_matches!(status, GatherOutputStatus::TimedOut ( duration ) if duration == Duration::from_secs(1));
@@ -1915,10 +1956,83 @@ mod tests {
                 None,
                 futures::stream::pending(),
                 None,
+                None,
+                #[cfg(target_os = "linux")]
+                None,
             )
             .await?;
         assert_matches!(status, GatherOutputStatus::Finished { exit_code, .. } if exit_code == 0);
         assert_eq!(stdout, b"\n");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_write_capture_artifacts() -> buck2_error::Result<()> {
+        use buck2_core::configuration::data::ConfigurationData;
+        use buck2_core::deferred::base_deferred_key::BaseDeferredKey;
+        use buck2_core::fs::buck_out_path::BuckOutPathKind;
+        use buck2_core::target::label::label::TargetLabel;
+        use buck2_execute::execute::request::CommandExecutionPaths;
+        use buck2_fs::paths::forward_rel_path::ForwardRelativePathBuf;
+        use buck2_hash::BuckIndexSet;
+
+        let (executor, root, _tmpdir) = test_executor()?;
+
+        let owner = BaseDeferredKey::TargetLabel(
+            TargetLabel::testing_parse("cell//pkg:target").configure(ConfigurationData::testing_new()),
+        );
+        let stdout_path = BuildArtifactPath::new(
+            owner.dupe(),
+            ForwardRelativePathBuf::unchecked_new("stdout.txt".into()),
+            BuckOutPathKind::Configuration,
+        );
+        // A content-based path exercises the placeholder location that output collection
+        // reads back from.
+        let stderr_path = BuildArtifactPath::new(
+            owner,
+            ForwardRelativePathBuf::unchecked_new("stderr.txt".into()),
+            BuckOutPathKind::ContentHash,
+        );
+
+        let paths = CommandExecutionPaths::new(
+            Vec::new(),
+            BuckIndexSet::default(),
+            &executor.artifact_fs,
+            DigestConfig::testing_default(),
+            None,
+        )?;
+        let request = CommandExecutionRequest::new(
+            Vec::new(),
+            Vec::new(),
+            paths,
+            Default::default(),
+        )
+        .with_stdout_artifact(Some(stdout_path.dupe()))
+        .with_stderr_artifact(Some(stderr_path.dupe()));
+
+        // In the real execution flow, parent directories are created by `create_output_dirs`.
+        for path in [&stdout_path, &stderr_path] {
+            let resolved = executor
+                .artifact_fs
+                .resolve_build(path, Some(&ContentBasedPathHash::for_output_artifact()))?;
+            fs_util::create_dir_all(root.join(resolved.parent().unwrap()))?;
+        }
+
+        executor.write_capture_artifacts(&request, b"this is stdout", b"this is stderr")?;
+
+        for (path, expected) in [
+            (&stdout_path, "this is stdout"),
+            (&stderr_path, "this is stderr"),
+        ] {
+            let resolved = executor
+                .artifact_fs
+                .resolve_build(path, Some(&ContentBasedPathHash::for_output_artifact()))?;
+            assert_eq!(
+                fs_util::read_to_string(root.join(resolved)).uncategorized()?,
+                expected
+            );
+        }
 
         Ok(())
     }

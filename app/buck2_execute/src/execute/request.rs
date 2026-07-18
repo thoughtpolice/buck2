@@ -399,6 +399,10 @@ pub struct CommandExecutionRequest {
     outputs_for_error_handler: Vec<BuildArtifactPath>,
     /// String representation of a key that uniquely identifies a RunAction
     run_action_key: Option<String>,
+    /// Output artifact to which the command's stdout is written
+    stdout_artifact: Option<BuildArtifactPath>,
+    /// Output artifact to which the command's stderr is written
+    stderr_artifact: Option<BuildArtifactPath>,
 
     is_test: bool,
     /// Whether to skip resource control (cgroup) for this command.
@@ -447,6 +451,8 @@ impl CommandExecutionRequest {
             meta_internal_extra_params: MetaInternalExtraParams::default_arc(),
             outputs_for_error_handler: Vec::new(),
             run_action_key: None,
+            stdout_artifact: None,
+            stderr_artifact: None,
             is_test: false,
             skip_resource_control: false,
             network_access: None,
@@ -688,6 +694,24 @@ impl CommandExecutionRequest {
 
     pub fn outputs_for_error_handler(&self) -> &Vec<BuildArtifactPath> {
         &self.outputs_for_error_handler
+    }
+
+    pub fn with_stdout_artifact(mut self, stdout_artifact: Option<BuildArtifactPath>) -> Self {
+        self.stdout_artifact = stdout_artifact;
+        self
+    }
+
+    pub fn stdout_artifact(&self) -> Option<&BuildArtifactPath> {
+        self.stdout_artifact.as_ref()
+    }
+
+    pub fn with_stderr_artifact(mut self, stderr_artifact: Option<BuildArtifactPath>) -> Self {
+        self.stderr_artifact = stderr_artifact;
+        self
+    }
+
+    pub fn stderr_artifact(&self) -> Option<&BuildArtifactPath> {
+        self.stderr_artifact.as_ref()
     }
 
     pub fn with_remote_execution_custom_image(

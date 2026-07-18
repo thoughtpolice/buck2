@@ -102,6 +102,12 @@ pub(crate) enum RunActionError {
         "`{}` was marked to be materialized on failure but is not declared as an output of the action.", .path
     )]
     FailedActionArtifactNotDeclared { path: String },
+    #[error("`stdout` and `stderr` cannot capture to the same artifact `{}`", .path)]
+    StdoutStderrSameArtifact { path: String },
+    #[error(
+        "artifact `{}` passed to `{}` is also used as an output elsewhere in the action, which is not allowed", .path, .param
+    )]
+    CaptureArtifactAlsoDeclaredAsOutput { param: &'static str, path: String },
     #[error(
         "Action is marked with `incremental_remote_outputs` but output `{}` is content-based, which is not allowed.", .path
     )]
@@ -213,6 +219,13 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
     ///     * The output must also be declared as an output of the action
     ///     * The output artifact must be created if the action fails
     ///     * Nothing will be provided if left empty (Which is the default)
+    ///  * `stdout`: an optional output artifact that receives everything the command writes to
+    ///    its stdout. Passing an artifact here declares it as an output of this action; it must
+    ///    not also be used as an output elsewhere in the action. The command's stdout is still
+    ///    reported to the console and the event log as usual ("tee" semantics). This works with
+    ///    both local and remote execution as well as with cache hits.
+    ///  * `stderr`: like `stdout`, but captures the command's stderr. `stdout` and `stderr`
+    ///    must be distinct artifacts.
     ///
     /// When actions execute, they'll do so from the root of the repository. As they execute,
     /// actions have exclusive access to their output directory.
@@ -291,6 +304,13 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
         // Note: Intentionally don't support frozen output artifacts
         #[starlark(require = named, default = UnpackListOrTuple::default())]
         outputs_for_error_handler: UnpackListOrTuple<
+            ValueTyped<'v, StarlarkOutputArtifact<'v>>,
+        >,
+        // Note: Intentionally don't support frozen output artifacts
+        #[starlark(require = named, default = NoneOr::None)] stdout: NoneOr<
+            ValueTyped<'v, StarlarkOutputArtifact<'v>>,
+        >,
+        #[starlark(require = named, default = NoneOr::None)] stderr: NoneOr<
             ValueTyped<'v, StarlarkOutputArtifact<'v>>,
         >,
         #[starlark(require = named, default = NoneOr::None)] expect_eligible_for_dedupe: NoneOr<
@@ -447,7 +467,7 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
         };
 
         let RunCommandArtifactVisitor {
-            inner: artifacts,
+            inner: mut artifacts,
             tagged_outputs,
             inputs_with_multiple_tags_for_dep_files,
             ..
@@ -455,6 +475,36 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
 
         if let Some(frozen) = { artifacts.frozen_outputs }.pop() {
             return Err(buck2_error::Error::from(ArtifactErrors::DuplicateBind(frozen)).into());
+        }
+
+        let stdout = stdout.into_option();
+        let stderr = stderr.into_option();
+
+        if let (Some(stdout), Some(stderr)) = (&stdout, &stderr) {
+            if stdout.artifact() == stderr.artifact() {
+                return Err(buck2_error::Error::from(
+                    RunActionError::StdoutStderrSameArtifact {
+                        path: stdout.to_string(),
+                    },
+                )
+                .into());
+            }
+        }
+
+        for (param, capture) in [("stdout", &stdout), ("stderr", &stderr)] {
+            if let Some(o) = capture {
+                let artifact = o.artifact();
+                if artifacts.declared_outputs.contains(&artifact) {
+                    return Err(buck2_error::Error::from(
+                        RunActionError::CaptureArtifactAlsoDeclaredAsOutput {
+                            param,
+                            path: o.to_string(),
+                        },
+                    )
+                    .into());
+                }
+                artifacts.declared_outputs.insert(artifact);
+            }
         }
 
         let mut dep_files_configuration = RunActionDepFiles::new();
@@ -551,6 +601,8 @@ pub(crate) fn analysis_actions_methods_run(methods: &mut MethodsBuilder) {
             },
             identifier: identifier.into_option(),
             outputs_for_error_handler: outputs_for_error_handler.items,
+            stdout,
+            stderr,
         });
 
         let re_dependencies = remote_execution_dependencies
