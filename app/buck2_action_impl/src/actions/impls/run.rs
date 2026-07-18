@@ -332,6 +332,8 @@ pub(crate) struct StarlarkRunActionValues<'v> {
     pub(crate) category: StringValue<'v>,
     pub(crate) identifier: Option<StringValue<'v>>,
     pub(crate) outputs_for_error_handler: Vec<ValueTyped<'v, StarlarkOutputArtifact<'v>>>,
+    pub(crate) stdout: Option<ValueTyped<'v, StarlarkOutputArtifact<'v>>>,
+    pub(crate) stderr: Option<ValueTyped<'v, StarlarkOutputArtifact<'v>>>,
 }
 
 #[derive(
@@ -353,6 +355,8 @@ pub(crate) struct FrozenStarlarkRunActionValues<'v> {
     pub(crate) category: StringValue<'v>,
     pub(crate) identifier: Option<StringValue<'v>>,
     pub(crate) outputs_for_error_handler: Vec<ValueTyped<'v, FrozenStarlarkOutputArtifact<'v>>>,
+    pub(crate) stdout: Option<ValueTyped<'v, FrozenStarlarkOutputArtifact<'v>>>,
+    pub(crate) stderr: Option<ValueTyped<'v, FrozenStarlarkOutputArtifact<'v>>>,
 }
 
 #[starlark_value(type = "RunActionValues")]
@@ -383,6 +387,8 @@ impl<'v> Freeze<'v> for StarlarkRunActionValues<'v> {
             category,
             identifier,
             outputs_for_error_handler,
+            stdout,
+            stderr,
         } = self;
 
         Ok(FrozenStarlarkRunActionValues {
@@ -403,6 +409,8 @@ impl<'v> Freeze<'v> for StarlarkRunActionValues<'v> {
                 }
                 frozen_outputs
             },
+            stdout: Freeze::freeze(stdout, freezer)?,
+            stderr: Freeze::freeze(stderr, freezer)?,
         })
     }
 }
@@ -911,6 +919,31 @@ impl RunAction {
             command_line_digest_for_dep_files.push_count();
         }
 
+        // The stdout/stderr capture assignment is part of the action's identity for dep file
+        // purposes: with it left out, swapping which artifact captures which stream leaves the
+        // command line and output paths unchanged, and a stale dep file entry would be reused
+        // with the wrong contents. Only hashed when set, so that the digests of actions which
+        // don't capture are unaffected.
+        for (marker, param, capture) in [
+            (
+                "__buck2_stdout_capture__",
+                "stdout",
+                &self.values().stdout,
+            ),
+            (
+                "__buck2_stderr_capture__",
+                "stderr",
+                &self.values().stderr,
+            ),
+        ] {
+            if let Some(path) = Self::capture_artifact_path(capture, param)? {
+                command_line_digest_for_dep_files.push_arg(Cow::Borrowed(marker));
+                command_line_digest_for_dep_files
+                    .push_arg(Cow::Owned(path.path().as_str().to_owned()));
+                command_line_digest_for_dep_files.push_count();
+            }
+        }
+
         // Digest inputs are in neither the command line nor the input tree; one digest
         // over their paths and contents stands in for the input-tree entries they would
         // otherwise have contributed.
@@ -1395,6 +1428,8 @@ impl RunAction {
         host_sharing_requirements: HostSharingRequirements,
     ) -> buck2_error::Result<CommandExecutionRequest> {
         let outputs_for_error_handler = self.outputs_for_error_handler()?;
+        let stdout_artifact = Self::capture_artifact_path(&self.values().stdout, "stdout")?;
+        let stderr_artifact = Self::capture_artifact_path(&self.values().stderr, "stderr")?;
         let mut req = prepared_run_action
             .into_command_execution_request()
             .with_prefetch_lossy_stderr(true)
@@ -1411,7 +1446,9 @@ impl RunAction {
                 self.inner.remote_execution_custom_image.clone().map(|s| *s),
             )
             .with_meta_internal_extra_params(self.inner.meta_internal_extra_params.clone())
-            .with_outputs_for_error_handler(outputs_for_error_handler);
+            .with_outputs_for_error_handler(outputs_for_error_handler)
+            .with_stdout_artifact(stdout_artifact)
+            .with_stderr_artifact(stderr_artifact);
 
         if let Some(timeout) = self.inner.timeout {
             req = req.with_timeout(timeout);
@@ -1432,6 +1469,30 @@ impl RunAction {
         }
 
         Ok(req)
+    }
+
+    /// The `BuildArtifactPath` of the artifact capturing one of the command's std streams,
+    /// if requested via the `stdout`/`stderr` parameters of `ctx.actions.run()`.
+    fn capture_artifact_path<'v>(
+        capture: &Option<ValueTyped<'v, FrozenStarlarkOutputArtifact<'v>>>,
+        param: &str,
+    ) -> buck2_error::Result<Option<BuildArtifactPath>> {
+        capture
+            .as_ref()
+            .map(|artifact| {
+                let a = artifact.inner().artifact();
+
+                match a.as_parts().0 {
+                    BaseArtifactKind::Source(s) => Err(buck2_error::buck2_error!(
+                        buck2_error::ErrorTag::Input,
+                        "Cannot use source artifact `{}` to capture `{}`",
+                        s.get_path(),
+                        param
+                    )),
+                    BaseArtifactKind::Build(b) => Ok(b.get_path().dupe()),
+                }
+            })
+            .transpose()
     }
 
     fn outputs_for_error_handler(&self) -> buck2_error::Result<Vec<BuildArtifactPath>> {
