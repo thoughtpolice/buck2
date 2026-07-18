@@ -912,6 +912,27 @@ message VersionControlRevision {
   optional string command_error = 3;
   // 40 characters hash for git revision.
   optional string git_revision = 4;
+  // Set when the repository is managed by Jujutsu. The checked-out revision
+  // (the working-copy commit's first parent) is still reported in
+  // `git_revision` above.
+  // The field number is deliberately high so that fields added upstream can
+  // never collide with it.
+  optional JujutsuData jj = 9000;
+}
+
+// Data about a Jujutsu (jj) repository.
+message JujutsuData {
+  // 32 character change ID of the working-copy commit `@`, in jj's reverse
+  // hex (z-k) alphabet.
+  optional string change_id = 1;
+  // Backing store type from `.jj/repo/store/type`, e.g. "git".
+  optional string backend = 2;
+  // Full `jj --version` output, e.g. "jj 0.43.0".
+  optional string version = 3;
+  // Whether a `.git` repository exists alongside `.jj` (colocated repo).
+  optional bool colocated = 4;
+  // Name of the jj workspace the command ran in, e.g. "default".
+  optional string workspace = 5;
 }
 
 // Event sent during build commands
@@ -2821,6 +2842,9 @@ message InvocationRecord {
   repeated string version_control_errors = 108;
   // 40 characters hash for git revision.
   optional string git_revision = 109;
+  // Jujutsu repository data. The field number is deliberately high so that
+  // fields added upstream can never collide with it.
+  optional JujutsuData jj = 9000;
 
   // Detailed per-backend RE stats.
   optional uint64 zdb_download_queries = 200;
