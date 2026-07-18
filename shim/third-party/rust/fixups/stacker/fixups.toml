@@ -1,0 +1,16 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
+# License, Version 2.0 found in the LICENSE-APACHE file in the root directory
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
+
+# `src/backends/windows.rs` carries an unconditional
+# `#[link(name = "stacker")]` for `__stacker_get_current_fiber`, which
+# `build.rs` compiles from `src/arch/windows.c` into a `stacker` library. The
+# attribute makes rustc request `stacker.lib` by name, so supplying the object
+# through a `cxx_library` dep is not enough - the build script has to run so its
+# `cargo:rustc-link-*` directives are honoured. It is a no-op off Windows:
+# `build.rs` only compiles anything when `TARGET` contains "windows".
+buildscript.run = true
