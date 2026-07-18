@@ -89,6 +89,7 @@ pub(crate) fn to_project_json(
     aliases: FxHashMap<Target, AliasedTargetInfo>,
     check_cycles: bool,
     include_all_buildfiles: bool,
+    use_clippy: bool,
     global_extra_cfgs: &[String],
     first_party_extra_cfgs: &[String],
     buck: &Buck,
@@ -261,10 +262,11 @@ pub(crate) fn to_project_json(
         check_cycles_in_crate_graph(&crates);
     }
 
-    let jp = ProjectJson {
-        sysroot: Box::new(sysroot),
-        crates,
-        runnables: vec![Runnable {
+    let mut runnables = vec![];
+
+    #[cfg(fbcode_build)]
+    {
+        runnables.extend([Runnable {
             program: "buck".to_owned(),
             args: vec![
                 "test".to_owned(),
@@ -276,7 +278,66 @@ pub(crate) fn to_project_json(
             ],
             cwd: project_root.to_owned(),
             kind: RunnableKind::TestOne,
-        }],
+        }]);
+    }
+
+    // OSS `buck2 test` supports different args, chiefly --test-arg
+    //
+    #[cfg(not(fbcode_build))]
+    {
+        let rust_project_executable = std::env::args().next().unwrap();
+        runnables.extend([
+            Runnable {
+                kind: RunnableKind::Flycheck,
+                program: rust_project_executable,
+                args: {
+                    let mut args = vec!["check".to_owned(), "{label}".to_owned()];
+                    if !use_clippy {
+                        args.push("--use-clippy".to_owned());
+                        args.push("false".to_owned());
+                    }
+                    args
+                },
+                cwd: project_root.clone(),
+            },
+            Runnable {
+                kind: RunnableKind::Run,
+                program: "buck2".to_string(),
+                args: vec!["run".to_owned(), "{label}".to_string()],
+                cwd: project_root.clone(),
+            },
+            Runnable {
+                kind: RunnableKind::TestOne,
+                program: "buck2".to_string(),
+                args: vec![
+                    "test".to_owned(),
+                    "-c=client.id=rust-project".to_owned(),
+                    "{label}".to_owned(),
+                    "--".to_owned(),
+                    // R-A substitutes {test_id} with e.g. `mycrate::tests::one`
+                    // --test-arg tells `buck2 test` to pass that string through to
+                    // the test program, which we will assume to be the rust test
+                    // harness. Same overall effect as `cargo test -- mycrate::tests::one`,
+                    //
+                    // But this is a bit less than ideal, because buck will build
+                    // all of the related test binaries, including integration tests.
+                    // We don't know your naming conventions for library tests.
+                    // You might have a rust_test target named `mycrate-test`. So
+                    // we might need a way (probably buck metadata in the library
+                    // target, or just querying the related tests)
+                    // to tell rust-project about these.
+                    "--test-arg".to_owned(),
+                    "{test_id}".to_owned(),
+                ],
+                cwd: project_root.clone(),
+            },
+        ]);
+    }
+
+    let jp = ProjectJson {
+        sysroot: Box::new(sysroot),
+        crates,
+        runnables,
         // needed to ignore the generated `rust-project.json` in diffs, but including the actual
         // string will mark this file as generated
         generated: String::from("\x40generated"),
@@ -622,17 +683,10 @@ impl Buck {
 
         command.arg("prelude//rust/rust-analyzer/check.bxl:check");
 
-        let mut file_path = saved_file.to_owned();
-        if !file_path.is_absolute() {
-            if let Ok(cwd) = std::env::current_dir() {
-                file_path = cwd.join(saved_file);
-            }
-        }
-
         // apply BXL scripts-specific arguments:
-        command.args(["--", "--file"]);
-        command.arg(file_path.as_os_str());
-
+        command.arg("--");
+        command.args(["--file"]);
+        command.arg(saved_file.as_os_str());
         command.args(["--use-clippy", &use_clippy.to_string()]);
 
         // Set working directory to the containing directory of the target file.
@@ -641,6 +695,35 @@ impl Buck {
         if let Some(parent_dir) = saved_file.parent() {
             command.current_dir(parent_dir);
         }
+
+        tracing::debug!(?command, "running bxl");
+
+        let output = command.output();
+
+        let files = deserialize_output(output, &command)?;
+        Ok(files)
+    }
+
+    #[instrument(fields(use_clippy, target = %target))]
+    pub(crate) fn check_target(
+        &self,
+        use_clippy: bool,
+        target: &Target,
+    ) -> Result<CheckOutput, anyhow::Error> {
+        let mut command = self.command(["bxl"]);
+
+        if let Some(mode) = &self.mode {
+            command.arg(mode);
+        }
+
+        command.arg("prelude//rust/rust-analyzer/check.bxl:check");
+
+        command.arg("--");
+        command.arg("--target");
+        command.arg(target);
+        command.args(["--use-clippy", &use_clippy.to_string()]);
+
+        tracing::debug!(?command, "running bxl");
 
         let output = command.output();
 
@@ -670,6 +753,8 @@ impl Buck {
             "--targets",
         ]);
         command.args(targets);
+
+        tracing::debug!(?command, "running bxl");
 
         let mut res: ExpandedAndResolved = deserialize_file_output(command.output(), &command)?;
 

@@ -35,6 +35,7 @@ use tracing_subscriber::layer::SubscriberExt;
 
 use crate::buck::Buck;
 use crate::cli::ProjectKind;
+use crate::cli::TargetOrFile;
 use crate::project_json::Crate;
 use crate::project_json::Dep;
 
@@ -87,6 +88,8 @@ enum Command {
         ///
         /// This option requires the presence of `rustc` in the `$PATH`, as rust-project
         /// will run `rustc --print sysroot` and ignore any other `sysroot` configuration.
+        ///
+        /// The sysroot_src is set to `${sysroot}/lib/rustlib/src/rust/library`
         #[clap(long, conflicts_with = "sysroot")]
         prefer_rustup_managed_toolchain: bool,
 
@@ -94,6 +97,11 @@ enum Command {
         /// Default value is determined based on platform.
         #[clap(short = 's', long)]
         sysroot: Option<PathBuf>,
+
+        /// Default is `${sysroot}/lib/rustlib/src/rust/library`. Not used when using
+        /// `.buckconfig`-managed sysroot.
+        #[clap(long)]
+        sysroot_src: Option<PathBuf>,
 
         /// Pretty-print generated `rust-project.json` file.
         #[clap(short, long)]
@@ -121,6 +129,11 @@ enum Command {
         /// Include a `build` section for every crate, including dependencies. Otherwise, `build` is only included for crates in the workspace.
         #[clap(long)]
         include_all_buildfiles: bool,
+
+        /// Enables clippy in the flycheck commands in `rust-project.json`
+        /// Default is true, pass `--use-clippy false` to disable
+        #[clap(short = 'c', long, default_value = "true", action = ArgAction::Set)]
+        use_clippy: bool,
     },
     /// `DevelopJson` is a more limited, stripped down [`Command::Develop`].
     ///
@@ -151,6 +164,11 @@ enum Command {
         #[clap(long, default_value = "50", env = "RUST_PROJECT_EXTRA_TARGETS")]
         max_extra_targets: Option<usize>,
 
+        /// Enables clippy in the flycheck commands in `rust-project.json`
+        /// Default is true, pass `--use-clippy false` to disable
+        #[clap(short = 'c', long, default_value = "true", action = ArgAction::Set)]
+        use_clippy: bool,
+
         args: JsonArguments,
     },
     /// Build the saved file's owning target. This is meant to be used by IDEs to provide diagnostics on save.
@@ -159,6 +177,8 @@ enum Command {
         #[clap(short = 'm', long)]
         mode: Option<String>,
 
+        /// Enables clippy in the flycheck commands in `rust-project.json`
+        /// Default is true, pass `--use-clippy false` to disable
         #[clap(short = 'c', long, default_value = "true", action = ArgAction::Set)]
         use_clippy: bool,
 
@@ -170,8 +190,11 @@ enum Command {
         #[clap(long)]
         buck2_command: Option<String>,
 
+        /// The target the users wishes to check. Contains a ":" character.
+        /// OR
         /// The file saved by the user. `rust-project` will infer the owning target(s) of the saved file and build them.
-        saved_file: PathBuf,
+        #[clap(id = "TARGET_OR_SAVED_FILE")]
+        target_or_saved_file: TargetOrFile,
     },
 }
 
@@ -270,7 +293,13 @@ fn file_from_command(command: &Command) -> Option<&Path> {
             JsonArguments::Path(p) | JsonArguments::Buildfile(p) => Some(p.as_path()),
             JsonArguments::Label(_) => None,
         },
-        Command::Check { saved_file, .. } => Some(saved_file.as_path()),
+        Command::Check {
+            target_or_saved_file,
+            ..
+        } => match target_or_saved_file {
+            TargetOrFile::File(saved_file) => Some(saved_file.as_path()),
+            TargetOrFile::Target(_) => None,
+        },
         Command::New { .. } => None,
     }
 }
@@ -355,8 +384,8 @@ fn main() -> Result<(), anyhow::Error> {
         Command::Check {
             mode,
             use_clippy,
-            saved_file,
             buck2_command,
+            target_or_saved_file,
             ..
         } => {
             let subscriber = tracing_subscriber::registry().with(fmt.with_filter(filter));
@@ -364,9 +393,11 @@ fn main() -> Result<(), anyhow::Error> {
 
             let buck = Buck::new(buck2_command, mode, project_root);
 
-            cli::Check::new(buck, use_clippy, saved_file.clone())
+            cli::Check::new(buck, use_clippy, target_or_saved_file.clone())
                 .run()
-                .inspect_err(|e| crate::scuba::log_check_error(e, &saved_file, use_clippy))
+                .inspect_err(|e| {
+                    crate::scuba::log_check_error(e, &target_or_saved_file, use_clippy)
+                })
         }
     }
 }
@@ -451,6 +482,7 @@ fn json_args_pass() {
             buck2_command: None,
             max_extra_targets: Some(50),
             mode: None,
+            use_clippy: true,
         }),
         version: false,
     };
@@ -471,6 +503,7 @@ fn json_args_pass() {
             buck2_command: None,
             max_extra_targets: Some(50),
             mode: None,
+            use_clippy: true,
         }),
         version: false,
     };
@@ -491,6 +524,7 @@ fn json_args_pass() {
             buck2_command: None,
             max_extra_targets: Some(50),
             mode: None,
+            use_clippy: true,
         }),
         version: false,
     };
