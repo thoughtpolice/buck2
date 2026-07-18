@@ -1,0 +1,12 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
+# License, Version 2.0 found in the LICENSE-APACHE file in the root directory
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
+
+# ctor >= 1.0.9 expands env!("CARGO_PKG_VERSION_{MAJOR,MINOR,PATCH}") in its
+# target_vendor = "apple" code path, so the buckified build needs the cargo
+# package env vars that a cargo build would provide.
+cargo_env = true
