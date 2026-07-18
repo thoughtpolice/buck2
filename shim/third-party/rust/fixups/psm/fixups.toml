@@ -1,0 +1,24 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# This source code is dual-licensed under either the MIT license found in the
+# LICENSE-MIT file in the root directory of this source tree or the Apache
+# License, Version 2.0 found in the LICENSE-APACHE file in the root directory
+# of this source tree. You may select, at your option, one of the
+# above-listed licenses.
+
+buildscript.run = false
+
+# psm's build.rs assembles one arch file and sets `cfg(asm)`, which gates
+# `psm::stack_pointer`. `stacker`'s Windows backend calls that unconditionally,
+# so MSVC cannot compile without it; other platforms degrade gracefully through
+# `psm_stack_information!`'s `no` branch, so they are left as they are.
+#
+# `link_asm` is deliberately not set: it adds `#[link(name = "psm_s")]`, but the
+# assembly arrives through the cxx_library dep below instead.
+['cfg(all(target_arch = "x86_64", target_os = "windows", target_env = "msvc"))']
+cfgs = ["asm"]
+
+[['cfg(all(target_arch = "x86_64", target_os = "windows", target_env = "msvc"))'.cxx_library]]
+name = "psm-asm-windows-msvc-x86_64"
+srcs = ["src/arch/x86_64_msvc.asm"]
+preferred_linkage = "static"
