@@ -26,6 +26,7 @@ use buck2_events::dispatch::span_async;
 use buck2_execute::digest_config::DigestConfig;
 use buck2_execute::execute::action_digest::ActionDigest;
 use buck2_execute::execute::blobs::ActionBlobs;
+use buck2_execute::execute::blocking::BlockingExecutor;
 use buck2_execute::execute::kind::CommandExecutionKind;
 use buck2_execute::execute::kind::RemoteCommandExecutionDetails;
 use buck2_execute::execute::kind::RemoteExecutionOrigin;
@@ -83,6 +84,7 @@ pub struct ReExecutor {
     pub project_fs: ProjectRoot,
     pub revision: Arc<LazyVcsRevision>,
     pub materializer: Arc<dyn Materializer>,
+    pub blocking_executor: Arc<dyn BlockingExecutor>,
     pub incremental_db_state: Arc<IncrementalDbState>,
     pub re_client: ManagedRemoteExecutionClient,
     /// For what the executor materializes; the RE request itself runs under `re_client`'s.
@@ -487,6 +489,7 @@ impl PreparedCommandExecutor for ReExecutor {
             request,
             execution_time,
             &*self.materializer,
+            &*self.blocking_executor,
             &self.re_client,
             self.invocation_re_use_case,
             *digest_config,
