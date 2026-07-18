@@ -20,6 +20,7 @@ use buck2_core::fs::project_rel_path::ProjectRelativePath;
 use buck2_events::dispatch::span_async;
 use buck2_execute::execute::action_digest::ActionDigest;
 use buck2_execute::execute::action_digest::ActionDigestKind;
+use buck2_execute::execute::blocking::BlockingExecutor;
 use buck2_execute::execute::dep_file_digest::DepFileDigest;
 use buck2_execute::execute::kind::CommandExecutionKind;
 use buck2_execute::execute::kind::RemoteCommandExecutionDetails;
@@ -47,6 +48,7 @@ use crate::re::paranoid_download::ParanoidDownloader;
 pub struct ActionCacheChecker {
     pub artifact_fs: ArtifactFs,
     pub materializer: Arc<dyn Materializer>,
+    pub blocking_executor: Arc<dyn BlockingExecutor>,
     pub re_client: ManagedRemoteExecutionClient,
     /// The buck2 invocation's, for what a cache hit materializes; the cache queries themselves
     /// run under `re_client`'s.
@@ -77,6 +79,7 @@ async fn query_action_cache_and_download_result(
     cache_type: CacheType,
     artifact_fs: &ArtifactFs,
     materializer: &dyn Materializer,
+    blocking_executor: &dyn BlockingExecutor,
     re_client: &ManagedRemoteExecutionClient,
     invocation_re_use_case: RemoteExecutorUseCase,
     re_action_key: &Option<String>,
@@ -193,6 +196,7 @@ async fn query_action_cache_and_download_result(
         request,
         TimeSpan::start_now(),
         materializer,
+        blocking_executor,
         re_client,
         invocation_re_use_case,
         digest_config,
@@ -274,6 +278,7 @@ impl PreparedCommandOptionalExecutor for ActionCacheChecker {
             cache_type,
             &self.artifact_fs,
             self.materializer.as_ref(),
+            self.blocking_executor.as_ref(),
             &self.re_client,
             self.invocation_re_use_case,
             &self.re_action_key,
@@ -294,6 +299,7 @@ impl PreparedCommandOptionalExecutor for ActionCacheChecker {
 pub struct RemoteDepFileCacheChecker {
     pub artifact_fs: ArtifactFs,
     pub materializer: Arc<dyn Materializer>,
+    pub blocking_executor: Arc<dyn BlockingExecutor>,
     pub re_client: ManagedRemoteExecutionClient,
     /// The buck2 invocation's, for what a cache hit materializes; the cache queries themselves
     /// run under `re_client`'s.
@@ -343,6 +349,7 @@ impl PreparedCommandOptionalExecutor for RemoteDepFileCacheChecker {
             cache_type,
             &self.artifact_fs,
             self.materializer.as_ref(),
+            self.blocking_executor.as_ref(),
             &self.re_client,
             self.invocation_re_use_case,
             &self.re_action_key,

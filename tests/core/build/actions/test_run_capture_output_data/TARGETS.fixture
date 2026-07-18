@@ -1,0 +1,33 @@
+load(
+    ":defs.bzl",
+    "capture",
+    "capture_also_output",
+    "capture_content_based",
+    "capture_only",
+    "capture_same_artifact",
+)
+
+capture(
+    name = "capture",
+    script = "capture.sh",
+)
+
+capture_only(
+    name = "capture_only",
+    script = "capture.sh",
+)
+
+capture_content_based(
+    name = "capture_content_based",
+    script = "capture.sh",
+)
+
+capture_same_artifact(
+    name = "capture_same_artifact",
+    script = "capture.sh",
+)
+
+capture_also_output(
+    name = "capture_also_output",
+    script = "capture.sh",
+)
