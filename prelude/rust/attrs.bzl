@@ -254,7 +254,7 @@ rust_common = struct(
 
 # Values of the `_rust_analyzer_target_kind` attribute, which tells rust-analyzer
 # what kind of crate a target produces.
-RustAnalyzerTargetKind = enum("bin", "lib", "test")
+RustAnalyzerTargetKind = enum("bin", "lib", "test", "unit_test")
 
 def rust_common_attributes(is_binary: bool):
     return (
