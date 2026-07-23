@@ -288,6 +288,9 @@ def rust_analyzer_target_kind(kind: str) -> dict[str, Attr]:
         "_rust_analyzer_target_kind": attrs.default_only(
             attrs.enum(RustAnalyzerTargetKind.values(), default = kind),
         ),
+        # Should require `RustAnalyzerInfo`, but `rust-analyzer/provider.bzl`
+        # loads this file. `rust_analyzer_provider` looks it up instead.
+        "unit_test_of": attrs.option(attrs.dep(), default = None),
     }
 
 def miri_interpreted_attr() -> dict[str, Attr]:
