@@ -178,27 +178,6 @@ fn do_render(
         parts.push(cpu_str);
     }
 
-    if snapshot.deferred_materializer_queue_size > 0 {
-        parts.push(format!(
-            "DM Queue = {}",
-            snapshot.deferred_materializer_queue_size
-        ));
-    }
-    if snapshot.blocking_executor_io_queue_size > 0 {
-        parts.push(format!(
-            "IO Queue = {}",
-            snapshot.blocking_executor_io_queue_size
-        ));
-    }
-    if snapshot.blocking_executor_io_inline_in_flight > 0
-        || snapshot.blocking_executor_io_inline_waiting > 0
-    {
-        parts.push(format!(
-            "IO Inline = {} ({} waiting)",
-            snapshot.blocking_executor_io_inline_in_flight,
-            snapshot.blocking_executor_io_inline_waiting
-        ));
-    }
     if !parts.is_empty() {
         lines.push(Line::from_iter([superconsole::Span::new_unstyled(
             parts.join("  "),
