@@ -1990,6 +1990,8 @@ mod tests {
                 re_download_bytes: 1024 * 1024 * 1024,
                 http_download_bytes: 512 * 1024 * 1024,
                 io_in_flight_read: 1,
+                deferred_materializer_queue_size: 1,
+                blocking_executor_io_queue_size: 1,
                 ..Default::default()
             },
         );
@@ -2017,9 +2019,11 @@ mod tests {
             normal.contains("Network: ↑ 10MiB 1.0MiB/s ↓ 1.5GiB 154MiB/s"),
             "unexpected render:\n{normal}"
         );
-        // In-flight I/O counters flicker in and out between snapshots, so
-        // they are deliberately not rendered.
+        // In-flight I/O counters and the queue depths flicker in and out
+        // between snapshots, so they are deliberately not rendered.
         assert!(!normal.contains("Read = 1"), "unexpected render:\n{normal}");
+        assert!(!normal.contains("DM Queue"), "unexpected render:\n{normal}");
+        assert!(!normal.contains("IO Queue"), "unexpected render:\n{normal}");
         assert_eq!(normal.lines().count(), 1, "unexpected render:\n{normal}");
 
         // Only the network totals survive into the final render; the
