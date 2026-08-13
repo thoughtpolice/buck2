@@ -2043,6 +2043,60 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn test_io_header_memory() -> buck2_error::Result<()> {
+        let re_state = ReState::new();
+
+        let mut two_snapshots = TwoSnapshots::default();
+        let start = std::time::SystemTime::UNIX_EPOCH;
+        two_snapshots.update(start, &buck2_data::Snapshot::default());
+        two_snapshots.update(
+            start + std::time::Duration::from_secs(10),
+            &buck2_data::Snapshot {
+                buck2_rss: Some(1024 * 1024 * 1024),
+                buck2_max_rss: 2 * 1024 * 1024 * 1024,
+                malloc_bytes_active: Some(768 * 1024 * 1024),
+                malloc_bytes_allocated: Some(512 * 1024 * 1024),
+                ..Default::default()
+            },
+        );
+
+        let config = SuperConsoleConfig::default();
+        let component = IoHeader {
+            super_console_config: &config,
+            re_state: &re_state,
+            two_snapshots: &two_snapshots,
+        };
+
+        let normal = component
+            .draw_unchecked(
+                Dimensions {
+                    width: 200,
+                    height: 10,
+                },
+                DrawMode::Normal,
+            )?
+            .fmt_for_test()
+            .to_string();
+        // Peak usage sits beside the running value on a single line, rather
+        // than in a second 'Memory Max' line stacked underneath it.
+        assert!(
+            normal.contains(
+                "Memory: RSS = 1.0GiB (max 2.0GiB)  Active = 768MiB (max 768MiB)  \
+                 Allocated = 512MiB (max 512MiB)  Slack = 256MiB (50.0%)"
+            ),
+            "unexpected render:\n{normal}"
+        );
+        assert!(
+            !normal.contains("Memory Max"),
+            "unexpected render:\n{normal}"
+        );
+        // The memory line, plus the CPU line.
+        assert_eq!(normal.lines().count(), 2, "unexpected render:\n{normal}");
+
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_slim_test_output() -> buck2_error::Result<()> {
         async fn frame_after_test_results(
