@@ -75,31 +75,51 @@ pub fn io_in_flight_non_zero_counters(
         .filter(|(_, value)| *value > 0)
 }
 
+/// One memory field, rendering the running value and its peak side by side as
+/// `Label = <current> (max <peak>)`. Either half is dropped when the platform or
+/// the allocator does not report it, and the field disappears entirely when
+/// neither is available.
+fn memory_field(label: &str, current: Option<u64>, max: Option<u64>) -> Option<String> {
+    match (current, max) {
+        (Some(current), Some(max)) => Some(format!(
+            "{label} = {} (max {})",
+            HumanizedBytes::fixed_width(current),
+            HumanizedBytes::new(max)
+        )),
+        (Some(current), None) => Some(format!(
+            "{label} = {}",
+            HumanizedBytes::fixed_width(current)
+        )),
+        (None, Some(max)) => Some(format!("Max {label} = {}", HumanizedBytes::new(max))),
+        (None, None) => None,
+    }
+}
+
 fn do_render(
     two_snapshots: &TwoSnapshots,
     snapshot: &buck2_data::Snapshot,
     network: Option<NetworkStats>,
 ) -> buck2_error::Result<Lines> {
     let mut lines = Vec::new();
-    const RSS_FIELD_WIDTH: usize = "RSS = ".len() + HumanizedBytes::FIXED_WIDTH_WIDTH;
 
     let mut allocator = Vec::new();
-    if let Some(rss) = snapshot.buck2_rss {
-        allocator.push(format!("RSS = {}", HumanizedBytes::fixed_width(rss)));
-    } else if snapshot.buck2_max_rss > 0
-        && (snapshot.malloc_bytes_active.is_some() || snapshot.malloc_bytes_allocated.is_some())
-    {
-        allocator.push(" ".repeat(RSS_FIELD_WIDTH));
-    }
-    if let Some(active) = snapshot.malloc_bytes_active {
-        allocator.push(format!("Active = {}", HumanizedBytes::fixed_width(active)));
-    }
-    if let Some(allocated) = snapshot.malloc_bytes_allocated {
-        allocator.push(format!(
-            "Allocated = {}",
-            HumanizedBytes::fixed_width(allocated)
-        ));
-    }
+    // Current RSS is unavailable on non-Linux Unix platforms, so max RSS is kept
+    // independent of it rather than gated on it.
+    allocator.extend(memory_field(
+        "RSS",
+        snapshot.buck2_rss,
+        (snapshot.buck2_max_rss > 0).then_some(snapshot.buck2_max_rss),
+    ));
+    allocator.extend(memory_field(
+        "Active",
+        snapshot.malloc_bytes_active,
+        two_snapshots.max_malloc_bytes_active,
+    ));
+    allocator.extend(memory_field(
+        "Allocated",
+        snapshot.malloc_bytes_allocated,
+        two_snapshots.max_malloc_bytes_allocated,
+    ));
     if let (Some(active), Some(allocated)) = (
         snapshot.malloc_bytes_active,
         snapshot.malloc_bytes_allocated,
@@ -119,42 +139,7 @@ fn do_render(
         ));
     }
     if !allocator.is_empty() {
-        lines.push(Line::unstyled(&format!(
-            "Memory    : {}",
-            allocator.join("  ")
-        ))?);
-    }
-
-    let mut allocator_max = Vec::new();
-    // Current RSS is unavailable on non-Linux Unix platforms, so keep max RSS independent of it.
-    if snapshot.buck2_max_rss > 0 {
-        allocator_max.push(format!(
-            "RSS = {}",
-            HumanizedBytes::fixed_width(snapshot.buck2_max_rss)
-        ));
-    } else if snapshot.buck2_rss.is_some()
-        && (two_snapshots.max_malloc_bytes_active.is_some()
-            || two_snapshots.max_malloc_bytes_allocated.is_some())
-    {
-        allocator_max.push(" ".repeat(RSS_FIELD_WIDTH));
-    }
-    if let Some(max_active) = two_snapshots.max_malloc_bytes_active {
-        allocator_max.push(format!(
-            "Active = {}",
-            HumanizedBytes::fixed_width(max_active)
-        ));
-    }
-    if let Some(max_allocated) = two_snapshots.max_malloc_bytes_allocated {
-        allocator_max.push(format!(
-            "Allocated = {}",
-            HumanizedBytes::fixed_width(max_allocated)
-        ));
-    }
-    if !allocator_max.is_empty() {
-        lines.push(Line::unstyled(&format!(
-            "Memory Max: {}",
-            allocator_max.join("  ")
-        ))?);
+        lines.push(Line::unstyled(&format!("Memory: {}", allocator.join("  ")))?);
     }
 
     let mut parts = Vec::new();
