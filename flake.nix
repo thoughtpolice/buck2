@@ -43,6 +43,9 @@
           ''
             export BUCK2_BUILD_PROTOC=${pkgs.protobuf}/bin/protoc
             export BUCK2_BUILD_PROTOC_INCLUDE=${pkgs.protobuf}/include
+            # NOTE (aseipp): rusqlite's `session` feature runs bindgen, which
+            # dlopen()s libclang; the system one isn't loadable from a nix shell
+            export LIBCLANG_PATH=${pkgs.llvmPackages_20.libclang.lib}/lib
           ''
           # enable mold for linux users, for more tolerable link times
           # we have to specify tokio_unstable in the RUSTFLAGS here since they override
