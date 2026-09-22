@@ -230,6 +230,7 @@ impl HasCommandExecutor for CommandExecutorFactory {
                 self.daemon_id.dupe(),
                 self.invocation_re_use_case,
                 sandbox_mode,
+                options.sandbox_paths.dupe(),
             )
         };
 
