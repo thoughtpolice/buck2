@@ -108,6 +108,9 @@ use crate::response::*;
 
 const DEFAULT_MAX_TOTAL_BATCH_SIZE: usize = 4 * 1000 * 1000;
 
+/// tonic's limit on the size of a decoded message, for clients that don't set their own.
+const TONIC_DEFAULT_MAX_DECODING_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
+
 /// Metadata key used to send the RE session ID on every outbound request, so
 /// that server-side logs and L7 proxies can correlate requests with the
 /// session ID buck2 reports to the user (console, errors, invocation records).
@@ -328,9 +331,12 @@ impl REClientBuilder {
             }
         };
 
-        let max_decoding_msg_size = opts
-            .max_decoding_message_size
-            .unwrap_or(capabilities.max_total_batch_size * 2);
+        // Execute and GetActionResult responses share this limit, and their size has nothing to
+        // do with the batch size, so a small batch size mustn't pull the default below tonic's.
+        let max_decoding_msg_size = opts.max_decoding_message_size.unwrap_or(std::cmp::max(
+            capabilities.max_total_batch_size * 2,
+            TONIC_DEFAULT_MAX_DECODING_MESSAGE_SIZE,
+        ));
 
         if max_decoding_msg_size < capabilities.max_total_batch_size {
             return Err(anyhow::anyhow!(
@@ -1325,26 +1331,26 @@ impl REClient {
 
     async fn execution_client(&self) -> anyhow::Result<ExecutionClient<GrpcService>> {
         let channel = self.pool.get(&self.engine_address).await?;
-        Ok(ExecutionClient::new(InterceptedService::new(
-            channel,
-            self.interceptor.dupe(),
-        )))
+        Ok(
+            ExecutionClient::new(InterceptedService::new(channel, self.interceptor.dupe()))
+                .max_decoding_message_size(self.max_decoding_msg_size),
+        )
     }
 
     async fn action_cache_client(&self) -> anyhow::Result<ActionCacheClient<GrpcService>> {
         let channel = self.pool.get(&self.action_cache_address).await?;
-        Ok(ActionCacheClient::new(InterceptedService::new(
-            channel,
-            self.interceptor.dupe(),
-        )))
+        Ok(
+            ActionCacheClient::new(InterceptedService::new(channel, self.interceptor.dupe()))
+                .max_decoding_message_size(self.max_decoding_msg_size),
+        )
     }
 
     async fn remote_asset_client(&self) -> anyhow::Result<FetchClient<GrpcService>> {
         let channel = self.pool.get(&self.cas_address).await?;
-        Ok(FetchClient::new(InterceptedService::new(
-            channel,
-            self.interceptor.dupe(),
-        )))
+        Ok(
+            FetchClient::new(InterceptedService::new(channel, self.interceptor.dupe()))
+                .max_decoding_message_size(self.max_decoding_msg_size),
+        )
     }
 
     pub fn get_metrics_client(&self) -> &Self {
@@ -2179,8 +2185,18 @@ mod tests {
     use re_grpc_proto::build::bazel::remote::asset::v1::FetchDirectoryResponse;
     use re_grpc_proto::build::bazel::remote::asset::v1::fetch_server;
     use re_grpc_proto::build::bazel::remote::asset::v1::fetch_server::FetchServer;
+    use re_grpc_proto::build::bazel::remote::execution::v2::CacheCapabilities;
+    use re_grpc_proto::build::bazel::remote::execution::v2::ServerCapabilities;
+    use re_grpc_proto::build::bazel::remote::execution::v2::WaitExecutionRequest;
+    use re_grpc_proto::build::bazel::remote::execution::v2::action_cache_server;
+    use re_grpc_proto::build::bazel::remote::execution::v2::action_cache_server::ActionCacheServer;
     use re_grpc_proto::build::bazel::remote::execution::v2::batch_read_blobs_response;
     use re_grpc_proto::build::bazel::remote::execution::v2::batch_update_blobs_response;
+    use re_grpc_proto::build::bazel::remote::execution::v2::capabilities_server;
+    use re_grpc_proto::build::bazel::remote::execution::v2::capabilities_server::CapabilitiesServer;
+    use re_grpc_proto::build::bazel::remote::execution::v2::execution_server;
+    use re_grpc_proto::build::bazel::remote::execution::v2::execution_server::ExecutionServer;
+    use re_grpc_proto::google::longrunning::Operation;
     use tonic::transport::Server;
 
     use super::*;
@@ -2237,6 +2253,17 @@ mod tests {
                 })),
                 Some("missing-digest") => Ok(tonic::Response::new(FetchBlobResponse {
                     status: Some(ok_status()),
+                    digest_function: 1,
+                    ..Default::default()
+                })),
+                // Bigger than tonic's default decoding limit (4 MiB).
+                Some("large-response") => Ok(tonic::Response::new(FetchBlobResponse {
+                    status: Some(ok_status()),
+                    uri: "x".repeat(5 * 1024 * 1024),
+                    blob_digest: Some(Digest {
+                        hash: "a".repeat(64),
+                        size_bytes: 42,
+                    }),
                     digest_function: 1,
                     ..Default::default()
                 })),
@@ -2384,6 +2411,22 @@ mod tests {
                 .to_string()
                 .contains("did not contain a digest")
         );
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_remote_asset_fetch_larger_than_tonic_default() -> anyhow::Result<()> {
+        let (client, server) = remote_asset_test_client().await?;
+
+        let blob = client
+            .fetch_remote_asset(
+                RemoteExecutionMetadata::default(),
+                blob_asset_request("large-response"),
+            )
+            .await?;
+        assert_eq!(blob.digest.hash, "a".repeat(64));
 
         server.abort();
         Ok(())
@@ -3661,6 +3704,210 @@ mod tests {
             .iter()
             .collect();
         assert_eq!(values, vec!["user-override"]);
+    }
+
+    /// Bigger than tonic's default decoding limit (4 MiB), smaller than the client's default of
+    /// twice the batch size.
+    const LARGE_ACTION_RESULT_STDOUT_BYTES: usize = 5 * 1024 * 1024;
+
+    /// Answers every Execute and GetActionResult with an action result whose inline stdout is
+    /// `stdout_bytes` long.
+    #[derive(Clone)]
+    struct LargeActionResultService {
+        stdout_bytes: usize,
+        /// Advertised in the capabilities. 0 means no limit.
+        max_batch_total_size_bytes: i64,
+    }
+
+    impl LargeActionResultService {
+        fn action_result(&self) -> ActionResult {
+            ActionResult {
+                stdout_raw: vec![b'x'; self.stdout_bytes],
+                execution_metadata: Some(ExecutedActionMetadata::default()),
+                ..Default::default()
+            }
+        }
+    }
+
+    #[tonic::async_trait]
+    impl capabilities_server::Capabilities for LargeActionResultService {
+        async fn get_capabilities(
+            &self,
+            _request: tonic::Request<GetCapabilitiesRequest>,
+        ) -> Result<tonic::Response<ServerCapabilities>, tonic::Status> {
+            Ok(tonic::Response::new(ServerCapabilities {
+                cache_capabilities: Some(CacheCapabilities {
+                    max_batch_total_size_bytes: self.max_batch_total_size_bytes,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }))
+        }
+    }
+
+    #[tonic::async_trait]
+    impl action_cache_server::ActionCache for LargeActionResultService {
+        async fn get_action_result(
+            &self,
+            _request: tonic::Request<GetActionResultRequest>,
+        ) -> Result<tonic::Response<ActionResult>, tonic::Status> {
+            Ok(tonic::Response::new(self.action_result()))
+        }
+
+        async fn update_action_result(
+            &self,
+            _request: tonic::Request<UpdateActionResultRequest>,
+        ) -> Result<tonic::Response<ActionResult>, tonic::Status> {
+            Err(tonic::Status::unimplemented("update_action_result"))
+        }
+    }
+
+    #[tonic::async_trait]
+    impl execution_server::Execution for LargeActionResultService {
+        type ExecuteStream = BoxStream<'static, Result<Operation, tonic::Status>>;
+        type WaitExecutionStream = BoxStream<'static, Result<Operation, tonic::Status>>;
+
+        async fn execute(
+            &self,
+            _request: tonic::Request<GExecuteRequest>,
+        ) -> Result<tonic::Response<Self::ExecuteStream>, tonic::Status> {
+            let response = GExecuteResponse {
+                result: Some(self.action_result()),
+                ..Default::default()
+            };
+            let operation = Operation {
+                done: true,
+                result: Some(OpResult::Response(prost_types::Any {
+                    type_url: "type.googleapis.com/build.bazel.remote.execution.v2.ExecuteResponse"
+                        .to_owned(),
+                    value: response.encode_to_vec(),
+                })),
+                ..Default::default()
+            };
+            Ok(tonic::Response::new(
+                futures::stream::iter([Ok(operation)]).boxed(),
+            ))
+        }
+
+        async fn wait_execution(
+            &self,
+            _request: tonic::Request<WaitExecutionRequest>,
+        ) -> Result<tonic::Response<Self::WaitExecutionStream>, tonic::Status> {
+            Err(tonic::Status::unimplemented("wait_execution"))
+        }
+    }
+
+    async fn large_action_result_test_client(
+        service: LargeActionResultService,
+    ) -> anyhow::Result<(REClient, tokio::task::JoinHandle<()>)> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?.to_string();
+        let incoming = futures::stream::unfold(listener, |listener| async move {
+            let item = listener.accept().await.map(|(stream, _)| stream);
+            Some((item, listener))
+        });
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_service(CapabilitiesServer::new(service.clone()))
+                .add_service(ActionCacheServer::new(service.clone()))
+                .add_service(ExecutionServer::new(service))
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        let client = REClientBuilder::build_and_connect(
+            &Buck2OssReConfiguration {
+                cas_address: Some(address.clone()),
+                engine_address: Some(address.clone()),
+                action_cache_address: Some(address),
+                tls: false,
+                ..Default::default()
+            },
+            1,
+        )
+        .await?;
+        Ok((client, server))
+    }
+
+    #[tokio::test]
+    async fn test_get_action_result_larger_than_tonic_default() -> anyhow::Result<()> {
+        let (client, server) = large_action_result_test_client(LargeActionResultService {
+            stdout_bytes: LARGE_ACTION_RESULT_STDOUT_BYTES,
+            max_batch_total_size_bytes: 0,
+        })
+        .await?;
+
+        let response = client
+            .get_action_result(
+                &RemoteExecutionMetadata::default(),
+                ActionResultRequest::default(),
+            )
+            .await?;
+        assert_eq!(
+            response.action_result.stdout_raw.map(|stdout| stdout.len()),
+            Some(LARGE_ACTION_RESULT_STDOUT_BYTES)
+        );
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_larger_than_tonic_default() -> anyhow::Result<()> {
+        let (client, server) = large_action_result_test_client(LargeActionResultService {
+            stdout_bytes: LARGE_ACTION_RESULT_STDOUT_BYTES,
+            max_batch_total_size_bytes: 0,
+        })
+        .await?;
+
+        let responses: Vec<_> = client
+            .execute_with_progress(
+                &RemoteExecutionMetadata::default(),
+                ExecuteRequest::default(),
+            )
+            .await?
+            .try_collect()
+            .await?;
+        let execute_response = responses
+            .into_iter()
+            .find_map(|response| response.execute_response)
+            .context("Execute stream ended without a response")?;
+        assert_eq!(
+            execute_response
+                .action_result
+                .stdout_raw
+                .map(|stdout| stdout.len()),
+            Some(LARGE_ACTION_RESULT_STDOUT_BYTES)
+        );
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_small_batch_size_keeps_tonic_default_decoding_limit() -> anyhow::Result<()> {
+        // Twice this batch size is below tonic's 4 MiB default, and the action result is
+        // between the two.
+        let stdout_bytes = 3 * 1024 * 1024;
+        let (client, server) = large_action_result_test_client(LargeActionResultService {
+            stdout_bytes,
+            max_batch_total_size_bytes: 1_000_000,
+        })
+        .await?;
+
+        let response = client
+            .get_action_result(
+                &RemoteExecutionMetadata::default(),
+                ActionResultRequest::default(),
+            )
+            .await?;
+        assert_eq!(
+            response.action_result.stdout_raw.map(|stdout| stdout.len()),
+            Some(stdout_bytes)
+        );
+
+        server.abort();
+        Ok(())
     }
 }
 
