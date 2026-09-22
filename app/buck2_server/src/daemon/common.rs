@@ -223,6 +223,7 @@ impl HasCommandExecutor for CommandExecutorFactory {
                 self.memory_tracker.dupe(),
                 self.daemon_id.dupe(),
                 sandbox_mode,
+                options.sandbox_paths.dupe(),
             )
         };
 
