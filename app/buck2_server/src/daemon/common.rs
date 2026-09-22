@@ -233,6 +233,7 @@ impl HasCommandExecutor for CommandExecutorFactory {
                 self.user_version.clone(),
                 self.invocation_re_use_case,
                 sandbox_mode,
+                options.sandbox_paths.dupe(),
             )
         };
 
