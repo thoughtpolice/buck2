@@ -12,6 +12,7 @@ use std::fmt::Display;
 use std::fmt::Formatter;
 use std::hash::Hash;
 use std::hash::Hasher;
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -65,10 +66,47 @@ impl FromStr for LocalSandboxMode {
     }
 }
 
+/// Paths outside the project that a sandboxed local action may access, besides its own inputs
+/// and outputs. A list left as `None` keeps the sandbox's built-in defaults.
+#[derive(Debug, Default, Eq, Hash, PartialEq, Clone, Allocative, Pagable)]
+pub struct LocalSandboxPaths {
+    /// Paths the action may read and execute beneath.
+    pub read: Option<Vec<String>>,
+    /// Paths the action may read and write beneath.
+    pub write: Option<Vec<String>>,
+}
+
+#[derive(Debug, buck2_error::Error)]
+#[buck2(input)]
+enum LocalSandboxPathsError {
+    #[error("Sandbox paths must be absolute, got `{0}`")]
+    RelativePath(String),
+}
+
+impl LocalSandboxPaths {
+    /// Check one configured list of paths. Relative paths are rejected, because they would
+    /// resolve against whatever directory the process applying the sandbox runs in.
+    pub fn parse_paths(
+        paths: impl IntoIterator<Item = String>,
+    ) -> buck2_error::Result<Vec<String>> {
+        paths
+            .into_iter()
+            .map(|path| {
+                if Path::new(&path).is_absolute() {
+                    Ok(path)
+                } else {
+                    Err(LocalSandboxPathsError::RelativePath(path).into())
+                }
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, Eq, Hash, PartialEq, Clone, Dupe, Allocative, Pagable)]
 pub struct LocalExecutorOptions {
     pub use_persistent_workers: bool,
     pub sandbox_mode: LocalSandboxMode,
+    pub sandbox_paths: Arc<LocalSandboxPaths>,
 }
 
 impl Default for LocalExecutorOptions {
@@ -76,6 +114,7 @@ impl Default for LocalExecutorOptions {
         Self {
             use_persistent_workers: true,
             sandbox_mode: LocalSandboxMode::Disabled,
+            sandbox_paths: Default::default(),
         }
     }
 }
@@ -785,6 +824,22 @@ mod tests {
         assert!(
             parse_network_access("default").is_err(),
             "Omitted network_access should use the default executor behavior"
+        );
+    }
+
+    #[test]
+    fn test_sandbox_paths_parse_keeps_absolute_paths() {
+        let paths = LocalSandboxPaths::parse_paths(["/opt/tools".to_owned(), "/nix".to_owned()]);
+        assert_eq!(paths.unwrap(), ["/opt/tools", "/nix"]);
+    }
+
+    #[test]
+    fn test_sandbox_paths_parse_rejects_relative_paths() {
+        let err = LocalSandboxPaths::parse_paths(["/opt/tools".to_owned(), "tools".to_owned()])
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("must be absolute, got `tools`"),
+            "{err}"
         );
     }
 }
