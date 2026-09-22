@@ -29,6 +29,7 @@ use buck2_common::local_resource_state::LocalResourceHolder;
 use buck2_core::content_hash::ContentBasedPathHash;
 use buck2_core::execution_types::executor_config::RemoteExecutorUseCase;
 use buck2_core::execution_types::executor_config::LocalSandboxMode;
+use buck2_core::execution_types::executor_config::LocalSandboxPaths;
 use buck2_core::fs::artifact_path_resolver::ArtifactFs;
 #[cfg(unix)]
 use buck2_sandbox::symlink_farm::SymlinkFarm;
@@ -155,6 +156,8 @@ pub struct LocalExecutor {
     /// buck2 invocation's, not that of any RE work the action's configuration involves.
     invocation_re_use_case: RemoteExecutorUseCase,
     sandbox_mode: LocalSandboxMode,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    sandbox_paths: Arc<LocalSandboxPaths>,
 }
 
 impl LocalExecutor {
@@ -172,6 +175,7 @@ impl LocalExecutor {
         daemon_id: DaemonId,
         invocation_re_use_case: RemoteExecutorUseCase,
         sandbox_mode: LocalSandboxMode,
+        sandbox_paths: Arc<LocalSandboxPaths>,
     ) -> Self {
         Self {
             artifact_fs,
@@ -187,6 +191,7 @@ impl LocalExecutor {
             daemon_id,
             invocation_re_use_case,
             sandbox_mode,
+            sandbox_paths,
         }
     }
 
@@ -837,7 +842,11 @@ impl LocalExecutor {
                 // because Landlock follows symlinks to real target paths.
                 let write_paths: Vec<std::path::PathBuf> =
                     vec![sandbox_root_str, self.root.as_path().join("buck-out")];
-                landlock_paths_data = buck2_sandbox::landlock::LandlockPaths::new(read_paths, write_paths);
+                landlock_paths_data = buck2_sandbox::landlock::LandlockPaths::new(
+                    read_paths,
+                    write_paths,
+                    &self.sandbox_paths,
+                );
                 landlock_paths_ref = Some(&landlock_paths_data);
             } else {
                 landlock_paths_ref = None;
@@ -2034,6 +2043,7 @@ mod tests {
             DaemonId::new(),
             RemoteExecutorUseCase::buck2_default(),
             LocalSandboxMode::Disabled,
+            Default::default(),
         );
 
         Ok((executor, temp.path().root().to_buf(), temp))
