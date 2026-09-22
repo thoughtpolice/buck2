@@ -202,14 +202,24 @@ fn create_endpoint(
     Ok(endpoint)
 }
 
-/// Create a lazy channel from an endpoint.
-fn channel_from_endpoint(endpoint: &tonic::transport::Endpoint) -> Channel {
-    // Since we are creating the HttpConnector ourselves, any TCP
-    // settings (tcp_nodelay, tcp_keepalive, connect_timeout), need to
-    // be set here instead of on the endpoint
+/// Create the connector that opens TCP connections for a channel.
+fn http_connector() -> HttpConnector {
+    // Since we are creating the HttpConnector ourselves, TCP settings
+    // (tcp_nodelay, tcp_keepalive) need to be set here instead of on the
+    // endpoint. The endpoint's connect_timeout still applies: tonic wraps
+    // this connector with it.
     let mut http = HttpConnector::new();
     http.enforce_http(false);
-    let connector = CountingConnector::new(http);
+    // tonic enables this by default, hyper doesn't. Without it, Nagle's
+    // algorithm can hold back a small write, like a gRPC frame, until the
+    // peer acknowledges the previous one.
+    http.set_nodelay(true);
+    http
+}
+
+/// Create a lazy channel from an endpoint.
+fn channel_from_endpoint(endpoint: &tonic::transport::Endpoint) -> Channel {
+    let connector = CountingConnector::new(http_connector());
 
     // We need to use a lazy channel so the pool isn't blocked waiting for new
     // connection IO
@@ -474,7 +484,9 @@ impl ChannelPool {
 #[cfg(test)]
 mod tests {
     use tonic::transport::Uri;
+    use tower::ServiceExt;
 
+    use super::http_connector;
     use super::prepare_uri;
 
     #[test]
@@ -487,5 +499,16 @@ mod tests {
         let uri = prepare_uri(uri, false).unwrap();
 
         assert_eq!(uri.to_string(), "http://example.com:1234/");
+    }
+
+    #[tokio::test]
+    async fn http_connector_disables_nagle() -> anyhow::Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let uri: Uri = format!("http://{}", listener.local_addr()?).parse()?;
+
+        let stream = http_connector().oneshot(uri).await?;
+
+        assert!(stream.inner().nodelay()?);
+        Ok(())
     }
 }
