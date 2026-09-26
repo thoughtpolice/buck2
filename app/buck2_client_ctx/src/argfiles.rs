@@ -272,7 +272,7 @@ fn resolve_flagfile(
             .into_abs_path_buf(),
         None => {
             let p = Path::new(path_part);
-            match AbsPath::new(path) {
+            match AbsPath::new(path_part) {
                 Ok(abs_path) => {
                     // FIXME(JakobDegen): Checks for normalization for historical reasons, not sure
                     // why we'd want that
@@ -377,6 +377,21 @@ mod tests {
             "{kind:?}"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_resolve_absolute_flagfile_with_flavor() -> buck2_error::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let root = AbsPathBuf::new(tempdir.path().canonicalize()?)?;
+        fs_util::write(root.join(".buckconfig"), "[cells]\nroot = .")?;
+        let mode_file = root.join("mode.py");
+        fs_util::write(&mode_file, "")?;
+
+        let cwd = AbsWorkingDir::unchecked_new(AbsNormPathBuf::new(root.to_path_buf())?);
+        let mut context = ImmediateConfigContext::new(&cwd);
+        let kind = resolve_flagfile(&format!("{mode_file}#opt"), &mut context, &cwd)?;
+        assert_eq!(kind.to_string(), "@root//mode.py#opt");
         Ok(())
     }
 
