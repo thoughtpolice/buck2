@@ -51,6 +51,8 @@ pub enum ArgFilePath {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ArgFileKind {
     PythonExecutable(ArgFilePath, Option<String>),
+    /// An executable file starting with `#!`. Buck2 runs it directly.
+    Executable(ArgFilePath, Option<String>),
     Path(ArgFilePath),
     Stdin,
 }
@@ -58,10 +60,12 @@ pub enum ArgFileKind {
 impl Display for ArgFileKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ArgFileKind::PythonExecutable(abs_path_buf, Some(flag)) => {
+            ArgFileKind::PythonExecutable(abs_path_buf, Some(flag))
+            | ArgFileKind::Executable(abs_path_buf, Some(flag)) => {
                 write!(f, "@{abs_path_buf}#{flag}")
             }
-            ArgFileKind::PythonExecutable(abs_path_buf, None) => write!(f, "@{abs_path_buf}"),
+            ArgFileKind::PythonExecutable(abs_path_buf, None)
+            | ArgFileKind::Executable(abs_path_buf, None) => write!(f, "@{abs_path_buf}"),
             ArgFileKind::Path(abs_path_buf) => write!(f, "@{abs_path_buf}"),
             ArgFileKind::Stdin => f.write_str("@-"),
         }
@@ -157,6 +161,7 @@ pub fn get_flagfile_for_logging(flagfile: &FlagfileArgSource) -> Option<&Flagfil
     match &flagfile.kind {
         ArgFileKind::Path(ArgFilePath::External(_))
         | ArgFileKind::PythonExecutable(ArgFilePath::External(_), _)
+        | ArgFileKind::Executable(ArgFilePath::External(_), _)
         | ArgFileKind::Stdin => None,
         _ => Some(flagfile),
     }
