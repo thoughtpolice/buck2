@@ -40,6 +40,34 @@ async def test_executable_argfile(buck: Buck) -> None:
     assert "bar = 1" in res.stdout
 
 
+@buck_test(skip_for_os=["windows"])
+async def test_python_argfile_interpreter(buck: Buck, tmp_path: Path) -> None:
+    python = tmp_path / "python"
+    python.write_text("#!/bin/sh\necho --config=foo.bar=2\n")
+    python.chmod(0o755)
+    res = await buck.audit_config(
+        "@//exec_argfile.py#iphonesimulator-x86_64",
+        "--cell",
+        "root",
+        "foo.bar",
+        env={"BUCK2_ARGFILE_PYTHON": str(python)},
+    )
+    assert "bar = 2" in res.stdout
+
+
+@buck_test(skip_for_os=["windows"])
+async def test_shebang_argfile(buck: Buck) -> None:
+    argfile = buck.cwd / "shebang_argfile"
+    argfile.write_text(
+        "#!/bin/sh\n"
+        'test "$BUCK2_ARG_FILE $*" = "1 --flavors opt" || exit 1\n'
+        "echo --config=foo.bar=1\n"
+    )
+    argfile.chmod(0o755)
+    res = await buck.audit_config("@//shebang_argfile#opt", "--cell", "root", "foo.bar")
+    assert "bar = 1" in res.stdout
+
+
 @buck_test()
 async def test_stdin_argfile(buck: Buck) -> None:
     res = await buck.audit_config(
