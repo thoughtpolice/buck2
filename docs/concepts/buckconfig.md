@@ -153,6 +153,32 @@ Furthermore, you can aggregate these settings into _flag files_ using the
 configuration file but uses a different syntax. Flag files are sometimes called
 _mode files_ or _at_ (`@`) files.
 
+### Flag files
+
+A flag file holds one argument per line. Buck2 skips empty lines, and lines that
+start with `--#` are comments. Pass a flag file as `@path` or `--flagfile path`.
+The path can be relative to the current directory, absolute, or a cell path such
+as `root//mode/opt`. A line in a flag file can name another flag file the same
+way.
+
+A flag file can also be a program that prints arguments to stdout, one per line.
+
+- If the file is executable and starts with `#!`, Buck2 runs it directly, so you
+  can write it in any language. This doesn't work on Windows.
+- Otherwise, Buck2 runs files ending in `.py` with `python3`. Set the
+  `BUCK2_ARGFILE_PYTHON` environment variable to use a different interpreter.
+
+Buck2 runs the program in the current directory and sets `BUCK2_ARG_FILE=1` in
+its environment. Text after a `#` in the path is a flavor, which Buck2 passes to
+the program. For example, `@mode/gen#opt` runs `mode/gen --flavors opt`.
+
+<FbInternalOnly>
+
+Internal builds of Buck2 run `.py` flag files with `fbpython` instead of
+`python3`.
+
+</FbInternalOnly>
+
 ## Precedence of Buck2 configuration specifications
 
 The following list shows the order of precedence for how Buck2 interprets its
