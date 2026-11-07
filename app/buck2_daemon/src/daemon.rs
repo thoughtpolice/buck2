@@ -397,6 +397,12 @@ impl DaemonCommand {
         if memory::is_using_jemalloc() {
             dice::set_thread_alloc_counters(mem_frag::thread_alloc_counters);
         }
+        // Elsewhere the buck2 binary's global allocator may be a `CountingAlloc` (mimalloc
+        // has no per-thread counters of its own). The reader returns `None` unless it is,
+        // and only the first reader installed takes effect.
+        if buck2_util::counting_alloc::thread_alloc_counters().is_some() {
+            dice::set_thread_alloc_counters(buck2_util::counting_alloc::thread_alloc_counters);
+        }
 
         let fb = buck2_common::fbinit::get_or_init_fbcode_globals();
 
