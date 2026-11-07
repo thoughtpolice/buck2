@@ -56,12 +56,17 @@ static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 // fiddling. it's still plenty fast and well maintained
 // - https://github.com/facebook/buck2/pull/693
 // - https://github.com/facebook/buck2/issues/91
+//
+// wrapped in `CountingAlloc`, because mimalloc keeps no per-thread byte totals: DICE
+// reads them around paging work to report the memory it frees and restores, which
+// fbcode builds get from jemalloc's `thread.allocatedp`.
 #[global_allocator]
 #[cfg(all(
     any(target_os = "windows", not(fbcode_build), buck_build),
     not(buck2_memfrag)
 ))]
-static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static ALLOC: buck2_util::counting_alloc::CountingAlloc<mimalloc::MiMalloc> =
+    buck2_util::counting_alloc::CountingAlloc::new(mimalloc::MiMalloc);
 
 // Opt-in fragmentation profiler, enabled with `-c buck2_dev.memfrag=true`. It wraps
 // the system allocator (jemalloc in an fbcode build) rather than bringing its
@@ -158,6 +163,12 @@ fn exec_with_logging(
 // it must be single-threaded. Commands that want to be multi-threaded/async
 // will start up their own tokio runtime.
 fn main() -> ! {
+    #[cfg(all(
+        any(target_os = "windows", not(fbcode_build), buck_build),
+        not(buck2_memfrag)
+    ))]
+    ALLOC.mark_installed();
+
     // Enable sampling early so the side table exists before the daemon forks
     // (fork copies the heap). The dump watcher is started later, post-fork, in
     // buck2_daemon — threads do not survive the daemonizing fork.
