@@ -76,6 +76,8 @@ jobs:
             triple: 'aarch64-apple-darwin'
           - os: 'windows-2022'
             triple: 'x86_64-pc-windows-msvc'
+          - os: 'windows-11-arm'
+            triple: 'aarch64-pc-windows-msvc'
     runs-on: ${{ matrix.target.os }}
     steps:
       - name: Checkout repository
@@ -88,6 +90,19 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends musl-tools musl-dev
+      - name: Install packages (Windows on Arm)
+        if: matrix.target.os == 'windows-11-arm'
+        shell: bash
+        run: |
+          # The windows-11-arm image ships no zstd, which the upload step needs.
+          if ! command -v zstd >/dev/null; then
+            choco install -y --no-progress zstandard
+          fi
+          # ring and aws-lc-sys compile their aarch64 Windows C and assembly
+          # with clang, which the image installs but may leave off PATH.
+          if ! command -v clang >/dev/null && [[ -d "/c/Program Files/LLVM/bin" ]]; then
+            echo 'C:\Program Files\LLVM\bin' >> "$GITHUB_PATH"
+          fi
       - name: Install Rust toolchain
         shell: bash
         env:
