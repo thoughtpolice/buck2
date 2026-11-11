@@ -1,4 +1,4 @@
-load("@prelude//python/meta_only:config.bzl", "DEFAULT_PY_VERSION")
+# @oss-disable[end= ]: load("@prelude//python/meta_only:config.bzl", "DEFAULT_PY_VERSION")
 load("@prelude//utils:source_listing.bzl", "source_listing")
 load(":defs.bzl", "cxx_hacks", "cxx_internal_tools")
 
@@ -13,66 +13,66 @@ cxx_internal_tools(
     visibility = ["PUBLIC"],
 )
 
-CONSTRUCTION_INTERPRETER = "fbcode//buck2/platform/python:interpreter-linux-stage0-{}".format(DEFAULT_PY_VERSION)
+# @oss-disable[end= ]: CONSTRUCTION_INTERPRETER = "fbcode//buck2/platform/python:interpreter-linux-stage0-{}".format(DEFAULT_PY_VERSION)
 
-[
-    prelude.python_bootstrap_binary_stage0(
-        name = name + "-construction",
-        interpreter = CONSTRUCTION_INTERPRETER,
-        main = name + ".py",
-    )
-    for name in [
-        "check_nonempty_output",
-        "clang_tidy_wrapper",
-        "concatenate_diagnostics",
-        "filter_argsfile",
-        "make_comp_db",
-        "remap_cwd",
-        "shlib_interface_link_wrapper",
-        "stderr_to_file",
-        "stub_header_unit",
-    ]
-]
+# @oss-disable[end= ]: [
+    # @oss-disable[end= ]: prelude.python_bootstrap_binary_stage0(
+        # @oss-disable[end= ]: name = name + "-construction",
+        # @oss-disable[end= ]: interpreter = CONSTRUCTION_INTERPRETER,
+        # @oss-disable[end= ]: main = name + ".py",
+    # @oss-disable[end= ]: )
+    # @oss-disable[end= ]: for name in [
+        # @oss-disable[end= ]: "check_nonempty_output",
+        # @oss-disable[end= ]: "clang_tidy_wrapper",
+        # @oss-disable[end= ]: "concatenate_diagnostics",
+        # @oss-disable[end= ]: "filter_argsfile",
+        # @oss-disable[end= ]: "make_comp_db",
+        # @oss-disable[end= ]: "remap_cwd",
+        # @oss-disable[end= ]: "shlib_interface_link_wrapper",
+        # @oss-disable[end= ]: "stderr_to_file",
+        # @oss-disable[end= ]: "stub_header_unit",
+    # @oss-disable[end= ]: ]
+# @oss-disable[end= ]: ]
 
-prelude.python_bootstrap_binary_stage0(
-    name = "dep_file_processor-construction",
-    interpreter = CONSTRUCTION_INTERPRETER,
-    main = "dep_file_processor.py",
-    deps = [":dep_file_processors"],
-)
+# @oss-disable[end= ]: prelude.python_bootstrap_binary_stage0(
+    # @oss-disable[end= ]: name = "dep_file_processor-construction",
+    # @oss-disable[end= ]: interpreter = CONSTRUCTION_INTERPRETER,
+    # @oss-disable[end= ]: main = "dep_file_processor.py",
+    # @oss-disable[end= ]: deps = [":dep_file_processors"],
+# @oss-disable[end= ]: )
 
-prelude.python_bootstrap_binary_stage0(
-    name = "hmap_wrapper.py-construction",
-    interpreter = CONSTRUCTION_INTERPRETER,
-    main = "hmap_wrapper.py",
-)
+# @oss-disable[end= ]: prelude.python_bootstrap_binary_stage0(
+    # @oss-disable[end= ]: name = "hmap_wrapper.py-construction",
+    # @oss-disable[end= ]: interpreter = CONSTRUCTION_INTERPRETER,
+    # @oss-disable[end= ]: main = "hmap_wrapper.py",
+# @oss-disable[end= ]: )
 
-prelude.command_alias(
-    name = "hmap_wrapper-construction",
-    args = [
-        "--hmap-tool=$(location prelude//third-party/hmaptool:hmaptool)",
-    ],
-    exe = ":hmap_wrapper.py-construction",
-    labels = ["buck2-only"],
-)
+# @oss-disable[end= ]: prelude.command_alias(
+    # @oss-disable[end= ]: name = "hmap_wrapper-construction",
+    # @oss-disable[end= ]: args = [
+        # @oss-disable[end= ]: "--hmap-tool=$(location prelude//third-party/hmaptool:hmaptool)",
+    # @oss-disable[end= ]: ],
+    # @oss-disable[end= ]: exe = ":hmap_wrapper.py-construction",
+    # @oss-disable[end= ]: labels = ["buck2-only"],
+# @oss-disable[end= ]: )
 
-cxx_internal_tools(
-    name = "internal_tools-construction",
-    check_nonempty_output = ":check_nonempty_output-construction",
-    clang_tidy_wrapper = ":clang_tidy_wrapper-construction",
-    concatenate_diagnostics = ":concatenate_diagnostics-construction",
-    dep_file_processor = ":dep_file_processor-construction",
-    dist_lto = "prelude//cxx/dist_lto/tools:dist_lto_tools-construction",
-    filter_argsfile = ":filter_argsfile-construction",
-    hmap_wrapper = ":hmap_wrapper-construction",
-    make_comp_db = ":make_comp_db-construction",
-    remap_cwd = ":remap_cwd-construction",
-    serialized_diagnostics_to_json_wrapper = ":serialized_diagnostics_to_json_wrapper",
-    shlib_interface_link_wrapper = ":shlib_interface_link_wrapper-construction",
-    stderr_to_file = ":stderr_to_file-construction",
-    stub_header_unit = ":stub_header_unit-construction",
-    visibility = ["PUBLIC"],
-)
+# @oss-disable[end= ]: cxx_internal_tools(
+    # @oss-disable[end= ]: name = "internal_tools-construction",
+    # @oss-disable[end= ]: check_nonempty_output = ":check_nonempty_output-construction",
+    # @oss-disable[end= ]: clang_tidy_wrapper = ":clang_tidy_wrapper-construction",
+    # @oss-disable[end= ]: concatenate_diagnostics = ":concatenate_diagnostics-construction",
+    # @oss-disable[end= ]: dep_file_processor = ":dep_file_processor-construction",
+    # @oss-disable[end= ]: dist_lto = "prelude//cxx/dist_lto/tools:dist_lto_tools-construction",
+    # @oss-disable[end= ]: filter_argsfile = ":filter_argsfile-construction",
+    # @oss-disable[end= ]: hmap_wrapper = ":hmap_wrapper-construction",
+    # @oss-disable[end= ]: make_comp_db = ":make_comp_db-construction",
+    # @oss-disable[end= ]: remap_cwd = ":remap_cwd-construction",
+    # @oss-disable[end= ]: serialized_diagnostics_to_json_wrapper = ":serialized_diagnostics_to_json_wrapper",
+    # @oss-disable[end= ]: shlib_interface_link_wrapper = ":shlib_interface_link_wrapper-construction",
+    # @oss-disable[end= ]: stderr_to_file = ":stderr_to_file-construction",
+    # @oss-disable[end= ]: stub_header_unit = ":stub_header_unit-construction",
+    # @oss-disable[end= ]: visibility = ["PUBLIC"],
+# @oss-disable[end= ]: )
 
 prelude.python_bootstrap_binary(
     name = "check_nonempty_output",
